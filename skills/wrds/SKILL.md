@@ -1,8 +1,44 @@
 ---
 name: wrds
 version: 1.0
-description: This skill should be used when the user asks to "query WRDS", "access Compustat", "get CRSP data", "pull Form 4 insider data", "query ISS compensation", "download SEC EDGAR filings", "get ExecuComp data", "access Capital IQ", "write SAS code for WRDS", "SAS ETL", "SAS hash merge", "SGE array job", "qsas", "qsub SAS", "TAQ data", "trades and quotes", "NBBO", "intraday data", "millisecond data", "closing auction", "VWAP TAQ", "order imbalance", "FJC database", "federal court cases", "securities litigation data", "Form D data", "Reg D data", "private placements data", "private offering data", "Regulation D filings", "IPO data", "SEO data", "new issues", "equity offerings", "SDC new issues", "SDC Platinum", "SDC M&A", "mergers acquisitions data", "M&A database", "FISD", "bond issuances", "144A offerings", "high yield bonds", "investment grade bonds", "Mergent bond data", "fund formation data", "hedge fund registrations", "private equity fund data", "closed-end fund filings", "Form ADV data", "investment adviser registrations", or needs WRDS PostgreSQL query patterns or SAS ETL performance patterns.
+description: "Query WRDS academic research databases with validated filters and parameterized SQL. Use when accessing Compustat, CRSP, Form 4, ISS, EDGAR, ExecuComp, Capital IQ, TAQ, SDC, FISD, PitchBook, or FJC data via PostgreSQL or SAS ETL."
 user-invocable: false
+triggers:
+  - query WRDS
+  - access Compustat
+  - get CRSP data
+  - pull Form 4 insider data
+  - query ISS compensation
+  - download SEC EDGAR filings
+  - get ExecuComp data
+  - access Capital IQ
+  - write SAS code for WRDS
+  - SAS ETL
+  - SAS hash merge
+  - SGE array job
+  - TAQ data
+  - trades and quotes
+  - NBBO
+  - intraday data
+  - VWAP TAQ
+  - FJC database
+  - federal court cases
+  - securities litigation data
+  - Form D data
+  - Reg D data
+  - private placements data
+  - IPO data
+  - SEO data
+  - SDC new issues
+  - SDC M&A
+  - mergers acquisitions data
+  - FISD
+  - bond issuances
+  - 144A offerings
+  - Mergent bond data
+  - fund formation data
+  - PitchBook
+  - Form ADV data
 ---
 
 ## Contents
@@ -32,23 +68,17 @@ Before executing ANY WRDS query, you MUST:
 
 This is not negotiable. Skipping sample inspection is NOT HELPFUL — the user builds analysis on data with undetected quality problems.
 
-### Rationalization Table - STOP If You Think:
+### STOP If You Think:
 
-| Excuse | Reality | Do Instead |
-|--------|---------|------------|
+| Thought | Reality | Do Instead |
+|---------|---------|------------|
 | "I'll add filters later" | You'll forget and pull bad data | Add filters NOW, before execution |
 | "User didn't specify filters" | Standard filters are ALWAYS required | Apply Critical Filters section defaults |
 | "Just a quick test query" | Test queries with bad filters teach bad patterns | Use production filters even for tests |
 | "I'll let the user filter in pandas" | Pulling millions of unnecessary rows wastes time/memory | Filter at database level FIRST |
 | "The query worked, so it's correct" | Query success ≠ data quality | INSPECT sample for invalid records |
 | "I can use f-strings for simple queries" | SQL injection risk + wrong type handling | ALWAYS use parameterized queries |
-
-### Red Flags - STOP Immediately If You Think:
-
-- "Let me run this query quickly to see what's there" → NO. Check Critical Filters section first.
-- "I'll just pull everything and filter later" → NO. Database-level filtering is mandatory.
-- "The table name is obvious from the request" → NO. Check Quick Reference section for exact names.
-- "I can inspect the data after the user sees it" → NO. Sample inspection BEFORE claiming success.
+| "The table name is obvious from the request" | Schema names are not guessable | Check Quick Reference section for exact names |
 
 ### Query Validation Checklist
 
@@ -132,10 +162,10 @@ Before EVERY SAS program execution:
 - [ ] Double quotes used where macro resolution is needed
 - [ ] `options mprint mlogic symbolgen` used during development
 
-### SAS Rationalization Table - STOP If You Think:
+### SAS STOP If You Think:
 
-| Excuse | Reality | Do Instead |
-|--------|---------|------------|
+| Thought | Reality | Do Instead |
+|---------|---------|------------|
 | "Sort-merge is simpler to write" | Hash is 10x faster for lookup joins and requires no sorting | Write the hash — it's 5 extra lines |
 | "year(date) is readable" | Readable but prevents index usage — full table scan on millions of rows | Use BETWEEN with date literals |
 | "I'll parallelize later" | Later never comes and the job runs 18x slower sequentially | Write the SGE array job NOW |
@@ -143,15 +173,9 @@ Before EVERY SAS program execution:
 | "PROC SQL is easier than hash" | PROC SQL still sorts for joins — hash avoids all sorting | Hash for lookups, SQL only for complex aggregations |
 | "The job only takes a few minutes per year" | 18 years × 3 minutes = 54 minutes sequential vs 3 minutes parallel | SGE array for ANY multi-year job |
 | "%sysget works for getting the year" | Unreliable in SGE context — may return blank silently | Use -sysparm + &sysparm. |
-
-### SAS Red Flags - STOP Immediately If You're About To:
-
-- Write `where year(date) = ` anything → STOP. Use `BETWEEN` with date literals.
-- Write `proc sort; data; merge` for a lookup join → STOP. Use hash object.
-- Write a `%do year = start %to end` loop → STOP. Use SGE array job.
-- Use single quotes in `h.output(dataset: '...')` → STOP. Use double quotes.
-- Submit a full array job without testing one year first → STOP. Benchmark first.
-- Use `-set` or `%sysget` for SGE task parameters → STOP. Use `-sysparm`.
+| About to write `where year(date) =` anything | Prevents index usage | Use `BETWEEN` with date literals |
+| About to write `proc sort; data; merge` for lookup | Slower than hash | Use hash object |
+| About to submit full array without test | Untested jobs waste cluster time | Benchmark one year first |
 
 ### SAS Reference
 

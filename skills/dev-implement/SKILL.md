@@ -1,8 +1,17 @@
 ---
 name: dev-implement
-description: “This skill should be used when the user asks to 'implement the plan', 'start building', or 'execute the tasks'.”
+description: “Orchestrate multi-task code implementation by delegating to subagents with test-driven development, per-task verification, and structured deviation handling. Use when the user asks to implement the plan, start building, execute development tasks, start coding, or kick off implementation.”
 user-invocable: false
 disable-model-invocation: true
+triggers:
+  - implement the plan
+  - start building
+  - execute the tasks
+  - start coding
+  - kick off implementation
+  - run implementation
+  - start development
+  - execute the plan
 allowed-tools: Read, Grep, Glob, Bash, Skill, TodoWrite, Agent
 hooks:
   PreToolUse:
@@ -140,12 +149,9 @@ AskUserQuestion(questions=[{
 
 **If Agent team:** Skip to [Agent Team Implementation (Parallel)](#agent-team-implementation-parallel).
 
-<EXTREMELY-IMPORTANT>
-## The Iron Law of TDD (Final Enforcement)
+## The Iron Law of TDD
 
-**YOU CANNOT WRITE IMPLEMENTATION CODE WITHOUT A FAILING TEST FIRST.**
-
-This is not a suggestion. This is the workflow. Every task follows:
+**YOU CANNOT WRITE IMPLEMENTATION CODE WITHOUT A FAILING TEST FIRST.** Every task follows:
 
 ```
 1. READ the test description from PLAN.md
@@ -155,29 +161,11 @@ This is not a suggestion. This is the workflow. Every task follows:
 5. RUN the test → SEE GREEN (pass)
 ```
 
-### Rationalization Prevention (Implementation Phase)
+If you wrote code without a failing test first, DELETE IT and start over. If a subagent skipped tests, REJECT the work.
 
-If you catch yourself thinking these, STOP IMMEDIATELY:
-
-| Thought | Reality | Action |
-|---------|---------|--------|
-| “No test infra, I’ll just implement” | You should have caught this in explore/clarify | STOP. Go back. Add Task 0. |
-| “SPEC.md says manual testing” | SPEC.md is wrong | STOP. Fix SPEC.md. Ask user. |
-| “This task is too simple for tests” | Simple tasks benefit MOST from tests | Write the test anyway. |
-| “I’ll add tests after this works” | That’s not TDD. That’s anti-helpful — untested code ships bugs. | DELETE your code. Write test first. |
-| “User is waiting, I’ll be quick” | User wants WORKING code, not fast code | Take time. Write test first. |
-| “The subagent skipped tests” | Your job is to catch that | REJECT the work. Redo with tests. |
-| “Just this one exception” | No exceptions. Ever. | Write the test. |
-
-**If you wrote code without a failing test first, DELETE IT and start over.**
-</EXTREMELY-IMPORTANT>
-
-<EXTREMELY-IMPORTANT>
 ## The Iron Law of Delegation
 
-**MAIN CHAT MUST NOT WRITE CODE. This is not negotiable.**
-
-Main chat orchestrates. Subagents implement. If you catch yourself about to use Write or Edit on a code file, STOP.
+**MAIN CHAT MUST NOT WRITE CODE.** Main chat orchestrates. Subagents implement.
 
 | Allowed in Main Chat | NOT Allowed in Main Chat |
 |---------------------|--------------------------|
@@ -187,35 +175,7 @@ Main chat orchestrates. Subagents implement. If you catch yourself about to use 
 | Run git commands | Any code editing |
 | Start ralph loops | Bypassing delegation |
 
-**If you’re about to edit code directly, STOP and spawn a Task agent instead.**
-
-### Rationalization Prevention
-
-These thoughts mean STOP—you’re rationalizing:
-
-| Thought | Reality |
-|---------|---------|
-| “It’s just a small fix” | Small fixes become big mistakes. Delegate. |
-| “I’ll be quick” | Quick means sloppy. Delegate. |
-| “The subagent will take too long” | Subagent time is cheap. Your context is expensive. |
-| “I already know what to do” | Knowing ≠ doing it well. Delegate. |
-| “Let me just do this one thing” | One thing leads to another. Delegate. |
-| “This is too simple for a subagent” | Simple is exactly when delegation works best. |
-| “I’m already here in the code” | Being there ≠ writing there. Delegate. |
-| “The user is waiting” | User wants DONE, not fast. They won’t debug your shortcuts. |
-| “This is just porting/adapting code” | Porting = writing = code. Delegate. |
-| “I already have context loaded” | Fresh context per task is the point. Delegate. |
-| “It’s config, not real code” | JSON/YAML/TOML = code. Delegate. |
-| “I need to set things up first” | Setup IS implementation. Delegate. |
-| “This is boilerplate” | Boilerplate = code = delegate. |
-| “PLAN.md is detailed, just executing” | Execution IS implementation. Delegate. |
-
-### The Meta-Rationalization
-
-**If you’re treating these rules as “guidelines for complex work” rather than “invariants for ALL work”, you’ve already failed.**
-
-Simple work is EXACTLY when discipline matters most—because that’s when you’re most tempted to skip it.
-</EXTREMELY-IMPORTANT>
+If you’re about to edit code directly, STOP and spawn a Task agent instead. This applies to ALL work — config, boilerplate, setup, porting. No exceptions.
 
 ### Context Monitoring
 
@@ -310,58 +270,24 @@ Key points from dev-delegate:
 
 ### Step 3: Verify and Complete (MANDATORY - DO NOT SKIP)
 
-<EXTREMELY-IMPORTANT>
-**YOU MUST VERIFY EACH OF THESE. “Task complete” without verification is NOT HELPFUL — you're shipping broken code the user will have to debug.**
-
 After Task agent returns, **you must personally verify** (not trust the agent’s report):
 
 #### 3a. Read the Actual Code
-```
-Read the implementation file(s) the agent claims to have written.
-Compare to SPEC.md requirements line by line.
-```
-- [ ] Code matches spec (not a different approach)
-- [ ] No substitutions (e.g., spec says IPC, code uses DOM = FAIL)
+- [ ] Code matches spec (not a different approach or substitution)
 
 #### 3b. Check Test Reality
-```
-Read the test file(s). Look for .skip(), mock-only tests, or tests that don’t call real code.
-```
 - [ ] Tests EXECUTE code (not grep/mock-only)
 - [ ] Tests are NOT skipped (SKIP ≠ PASS)
-- [ ] Integration tests exist and run (not just unit tests)
+- [ ] Integration tests exist and run
 
 #### 3c. Run Tests Yourself
-```
-Actually run the test command. Read the output.
-```
 - [ ] Test command runs without error
-- [ ] Tests actually pass (not “66 pass, 0 fail” with 50 skipped)
-- [ ] Test output shows real assertions (not just “test exists”)
+- [ ] Tests actually pass (watch for skipped tests masking failures)
 
-#### 3d. Verify Real Integration (FOR EXTERNAL SYSTEMS)
-```
-If the feature integrates with an external system (Electron app, API, database),
-you MUST verify it works against the real system, not just mocks.
-```
-- [ ] External system is actually running
-- [ ] Feature actually works (not just “code runs without error”)
-- [ ] Output is visible in the external system
+#### 3d. Verify Real Integration (for external systems)
+- [ ] External system is running and feature works against it
 
-**If ANY check fails → REJECT the work. Do NOT mark task complete.**
-
-### Rationalization Prevention (Verification Phase)
-
-| Thought | Reality | Action |
-|---------|---------|--------|
-| “The agent said tests pass” | Agents lie. Verify yourself. | Run the tests. |
-| “66 tests passing is enough” | Count skipped tests. Read test code. | Check for fake tests. |
-| “I’ll verify at the end” | You’ll forget. Bugs compound. | Verify NOW. |
-| “The spec said X, code does Y, but Y is close enough” | Close enough = wrong. | Reject and redo. |
-| “Integration test is skipped but unit tests pass” | Unit tests don’t prove integration works. | Require real integration test. |
-| “External system isn’t running, but code is correct” | Untested code is broken code. | Start the system and test. |
-
-**If ALL pass → output the promise.** If ANY fail → iterate.
+**If ANY check fails → REJECT the work. Do NOT mark task complete.** If ALL pass → output the promise.
 
 ### Task Summary (MANDATORY after each task)
 
@@ -431,18 +357,6 @@ All deviations tracked per task:
 
 End each task summary with: **Total deviations:** N auto-fixed (R1: X, R2: Y, R3: Z). **Impact:** [assessment].
 
-## Why Skipping Hurts the Thing You Care About Most
-
-| Your Drive | Why You Skip | What Actually Happens | The Drive You Failed |
-|------------|-------------|----------------------|---------------------|
-| **Helpfulness** | "Skipping TDD gets code to user faster" | Untested code creates bugs the user discovers later | **Anti-helpful** |
-| **Competence** | "I assumed it works, no need to run tests" | The user runs it and it fails — your assumption destroyed trust | **Incompetent** |
-| **Efficiency** | "Skipping spec check saves time" | Spec drift means rework — your speed was waste | **Inefficient** |
-| **Approval** | "I'll delegate without full context" | Subagent builds wrong thing, you redo everything — user loses trust | **Trust destroyed** |
-| **Honesty** | "Task complete" without running tests | You claimed tests pass without running them — that's fabrication | **Dishonest** |
-
-**The protocol is not overhead you pay. It is the service you provide.**
-
 ## Sub-Skills Reference
 
 | Skill | Purpose | Used By |
@@ -454,109 +368,18 @@ End each task summary with: **Total deviations:** N auto-fixed (R1: X, R2: Y, R3
 
 ## Failure Recovery Protocol
 
-**Pattern from oh-my-opencode: After 3 consecutive implementation failures, escalate.**
+**After 3 consecutive implementation failures, escalate.**
 
-### 3-Failure Trigger
+1. **STOP** — no more “let me try a different approach”
+2. **REVERT** — `git checkout <last-passing-commit>`, document attempts in `.planning/RECOVERY.md`
+3. **DOCUMENT** — all 3 approaches, their test failures, and what the pattern reveals
+4. **CONSULT USER** — present findings and ask for direction:
+   - A) Re-examine requirements (/dev-clarify)
+   - B) Try different design (/dev-design)
+   - C) Investigate test failures (/dev-debug)
+   - D) User provides domain knowledge
 
-If you attempt 3 implementations and ALL fail tests:
-
-```
-Iteration 1: Implement approach A → tests fail
-Iteration 2: Implement approach B → tests fail
-Iteration 3: Implement approach C → tests fail
-→ TRIGGER RECOVERY PROTOCOL
-```
-
-### Recovery Steps
-
-1. **STOP** all further implementation attempts
-   - No more “let me try a different approach”
-   - No guessing or throwing code at the problem
-
-2. **REVERT** to last known working state
-   - `git checkout <last-passing-commit>`
-   - Or revert specific files
-   - Document what was attempted in `.planning/RECOVERY.md`
-
-3. **DOCUMENT** what was attempted
-   - All 3 approaches tried
-   - Test failures for each
-   - Why each approach failed
-   - What this reveals about the problem
-
-4. **CONSULT** with user BEFORE continuing
-   - “I’ve tried 3 approaches. All fail tests. Here’s what I’ve learned...”
-   - Present test failure patterns
-   - Request: requirements clarification, design input, or different strategy
-
-5. **ASK USER** for direction
-   - Option A: Re-examine requirements (may need /dev-clarify)
-   - Option B: Try completely different design (may need /dev-design)
-   - Option C: Investigate why tests fail (may need /dev-debug)
-   - Option D: User provides domain knowledge
-
-**NO PASSING TESTS = NOT COMPLETE** (hard rule)
-
-### Recovery Checklist
-
-Before continuing after multiple failures:
-
-- [ ] All 3 approaches documented with test failures
-- [ ] Pattern in failures identified (same tests? different errors?)
-- [ ] Current code reverted to clean state
-- [ ] User consulted with specific question
-- [ ] Clear direction from user before proceeding
-
-### Anti-Patterns After Failures
-
-**DON’T:**
-- Keep trying “just one more thing”
-- Make larger and larger changes
-- Skip TDD “to get it working first”
-- Suppress test failures (“I’ll fix them later”)
-- Blame the tests (“tests are wrong”)
-
-**DO:**
-- Stop and analyze the failure pattern
-- Revert to clean state
-- Document what each approach revealed
-- Consult user with specific findings
-- Get clear direction before continuing
-
-### Example Recovery Flow
-
-```
-Loop 1: Implement with synchronous approach → Tests timeout
-Loop 2: Implement with async/await → Tests hang
-Loop 3: Implement with promises → Tests fail assertion
-
-→ RECOVERY PROTOCOL:
-1. STOP (no loop 4)
-2. REVERT: git checkout HEAD -- src/feature.ts tests/
-3. DOCUMENT in .planning/RECOVERY.md:
-   - Pattern: All async implementations cause timing issues
-   - Tests expect synchronous behavior
-   - Hypothesis: Requirements may need async, tests don’t handle it
-4. ASK USER:
-   “I’ve tried 3 async implementations. All cause timing issues.
-    Tests expect synchronous behavior.
-
-    This suggests either:
-    A) Feature should actually be synchronous (simpler)
-    B) Tests need updating for async behavior
-
-    Which direction should I take?”
-```
-
-### When to Trigger Recovery
-
-Trigger after 3 failures when:
-- Same test keeps failing despite different approaches
-- Different tests fail in pattern (suggests wrong approach)
-- Tests pass locally but fail in CI
-- Implementation works but breaks unrelated tests
-
-Don’t wait for max iterations - trigger early when pattern emerges.
+Trigger early when a failure pattern emerges — don’t wait for max iterations.
 
 ## If Max Iterations Reached
 
@@ -575,24 +398,13 @@ Main chat should:
 
 ## No Pause Between Tasks
 
-<EXTREMELY-IMPORTANT>
 **After completing task N, IMMEDIATELY start task N+1 in the SAME RESPONSE. Do NOT pause.**
 
 ### Post-Promise Checklist (mandatory, same response)
 
-1. **Update PLAN.md** - Mark task `[x]` complete
-2. **Log to LEARNINGS.md** - What was done
-3. **Start next task’s ralph loop** - No waiting
-
-| Thought | Reality |
-|---------|---------|
-| “Task done, let me check in with user” | NO. User wants ALL tasks done. Keep going. |
-| “User might want to review” | User will review at the END. Continue. |
-| “Natural pause point” | Only pause when ALL tasks complete or blocked. |
-| “Let me summarize progress” | Summarize AFTER all tasks. Keep moving. |
-| “User has been waiting” | User is waiting for COMPLETION, not updates. |
-| “Should I continue?” | YES. Never ask. Just continue. |
-| “I’ll update PLAN.md later” | NO. Update it NOW before next task. |
+1. **Update PLAN.md** — Mark task `[x]` complete
+2. **Log to LEARNINGS.md** — What was done, test command, exit code
+3. **Start next task’s ralph loop** — No waiting
 
 ### Valid Stopping Points (only these three)
 
@@ -600,27 +412,17 @@ Main chat should:
 2. You hit a blocker requiring user input (state exactly what you need)
 3. User explicitly interrupted
 
-The promise signals task completion. After outputting promise, update PLAN.md, then IMMEDIATELY start next task’s loop.
-
-**Pausing between tasks is procrastination disguised as courtesy.**
-
-### Task Transition Gate (MANDATORY)
+### Task Transition Gate
 
 After each task’s ralph loop completes:
 
 1. Update PLAN.md — mark completed task `[x]`
-2. Append to LEARNINGS.md — what was accomplished, test command, exit code
+2. Append to LEARNINGS.md — what was accomplished
 3. Check for blockers — dependencies from task N needed for N+1?
 4. If clear → IMMEDIATELY spawn ralph loop for task N+1
-5. If blocked → Ask user EXACTLY what’s missing (not "I’m blocked")
+5. If blocked → Ask user EXACTLY what’s missing
 
-**Violations to catch:**
-- "Let me check with user if they want me to continue" → NO, continue automatically
-- "Should I move to task N+1?" → NO, you’re supposed to move
-- "Let me summarize what we learned" → NO, move to task N+1
-
-Pausing > 30 seconds between tasks means you’ve stopped. You shouldn’t have.
-</EXTREMELY-IMPORTANT>
+Never ask “should I continue?” — just continue. Pausing between tasks is procrastination disguised as courtesy.
 
 ## Agent Team Implementation (Parallel)
 
@@ -642,10 +444,7 @@ Read `${CLAUDE_SKILL_DIR}/../../skills/dev-implement/references/agent-team-proto
 
 ## Test Gap Validation Gate (MANDATORY)
 
-<EXTREMELY-IMPORTANT>
-**After ALL implementation tasks complete, you MUST run test gap test gap validation BEFORE proceeding to review.**
-
-This gate validates that every requirement in SPEC.md has corresponding test coverage. TDD ensures task-level coverage; test gap ensures requirement-level coverage. They are different checks.
+**After ALL implementation tasks complete, run test gap validation BEFORE proceeding to review.** TDD ensures task-level coverage; test gap ensures requirement-level coverage.
 
 ### Invoke test gap Validation
 
@@ -659,28 +458,10 @@ Read `${CLAUDE_SKILL_DIR}/../../skills/dev-test-gaps/SKILL.md` and follow its in
 |---------------------|--------|
 | `validated` | Proceed to review phase |
 | `gaps_found` (gaps filled, no escalations) | Re-run full test suite. If all pass, proceed. |
-| `gaps_found` (with escalations) | Address escalated implementation bugs: spawn targeted ralph loops for failing requirements, then re-run test gap validation |
+| `gaps_found` (with escalations) | Spawn targeted ralph loops for failing requirements, then re-run validation |
 | Missing | STOP. Run test gap validation. |
 
-### Re-validation After Gap Fixes
-
-If test gap reports implementation bugs (escalations):
-
-1. Spawn ralph loops ONLY for the specific failing requirements
-2. After fixes, re-invoke dev-test-gaps to re-validate
-3. Repeat until VALIDATION.md status is `validated`
-4. Max 2 re-validation cycles. After that, escalate to user.
-
-### Rationalization Prevention
-
-| Thought | Reality |
-|---------|---------|
-| "All task tests pass, test gap is redundant" | Task tests != requirement coverage. Gaps hide between tasks. Run test gap. |
-| "test gap will slow us down" | Shipping untested requirements slows the USER down. Run test gap. |
-| "I'll validate coverage manually" | Manual validation is not validation. Run the skill. |
-| "Requirements are simple, tests obviously cover them" | "Obviously" is not evidence. Run test gap and prove it. |
-| "We already wrote thorough tests" | Then test gap will confirm that quickly. Run it. |
-</EXTREMELY-IMPORTANT>
+Max 2 re-validation cycles. After that, escalate to user.
 
 ## Phase Complete
 

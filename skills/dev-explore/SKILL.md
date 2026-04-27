@@ -1,8 +1,19 @@
 ---
 name: dev-explore
-description: "This skill should be used when the user asks to 'explore the codebase', 'map architecture', 'find similar features', or in Phase 2 of /dev workflow."
+description: "Map codebase architecture, trace execution paths, find similar features, and discover test infrastructure. Use when the user asks to understand the code, navigate codebase structure, explore how a feature works, or find existing patterns before designing changes."
 user-invocable: false
 disable-model-invocation: true
+triggers:
+  - explore the codebase
+  - understand the code
+  - how does this work
+  - code structure
+  - navigate codebase
+  - map architecture
+  - find similar features
+  - trace execution paths
+  - discover test infrastructure
+  - code exploration
 hooks:
   PreToolUse:
     - matcher: "Grep|Glob|Agent"
@@ -32,40 +43,27 @@ hooks:
 Map relevant code, trace execution paths, and return prioritized files for reading.
 **Prerequisite:** `.planning/SPEC.md` must exist with draft requirements.
 
-<EXTREMELY-IMPORTANT>
 ## The Iron Law of Exploration
 
-**RETURN KEY FILES LIST. This is not negotiable.**
-
-Every exploration, you MUST return:
+**RETURN KEY FILES LIST.** Every exploration MUST return:
 1. Summary of findings
 2. **5-10 key files** with line numbers and purpose
 3. Patterns discovered
 
 After agents return, **you MUST read all key files** before proceeding.
 
-**STOP if you're about to move on without reading all key files.**
-</EXTREMELY-IMPORTANT>
+### STOP If Thinking:
 
-### Rationalization Table - STOP If Thinking:
-
-| Excuse | Reality | Do Instead |
-|--------|---------|------------|
+| Thought | Reality | Do Instead |
+|---------|---------|------------|
 | "I can design without reading all key files" | You'll miss critical patterns | READ every file on the list |
 | "The file names tell me enough" | File names hide implementation details | READ the actual code |
 | "I'll read them if I need more info" | You cannot know what is missing | READ all key files NOW |
 | "Exploration summary is enough" | Summaries miss crucial nuances | READ original files |
 | "Reading files will take too long" | You'll waste days later by skipping them | READ now, save time later |
 | "I already understand the architecture" | Your assumptions remain incomplete | READ to confirm understanding |
-| "I can grep for specific details later" | You'll miss context and relationships | READ to understand connections |
 
-### Drive-Aligned Framing
-
-**Returning key files without reading them is NOT HELPFUL — you'll design against imagined code and create days of rework.**
-
-Exploration agents find the files. Main chat MUST read them to understand the codebase. Skipping reads means proceeding with incomplete knowledge, which guarantees wrong implementation choices.
-
-Reading costs minutes. Wrong architecture costs days of rework.
+Returning key files without reading them means designing against imagined code. Reading costs minutes; wrong architecture costs days of rework.
 
 ### No Pause After Completion
 
@@ -98,18 +96,7 @@ The workflow phases are SEQUENTIAL. Complete explore → immediately start clari
 
 ### 1. Launch 3-5 Explore Agents in Parallel + Background
 
-<EXTREMELY-IMPORTANT>
-**Launch ALL agents in a SINGLE message with multiple Task calls.**
-
-**Use `run_in_background: true` for ALL explore agents.**
-
-This enables true parallel execution:
-- All agents start immediately
-- Main conversation continues without blocking
-- Results collected asynchronously with TaskOutput
-
-Pattern from oh-my-opencode: Default to background + parallel for exploratory work.
-</EXTREMELY-IMPORTANT>
+**Launch ALL agents in a SINGLE message with multiple Task calls, using `run_in_background: true` for parallel execution.** Results collected asynchronously with TaskOutput.
 
 Based on `.planning/SPEC.md`, spawn 3-5 agents with different focuses:
 
@@ -251,13 +238,7 @@ Use ast-grep (`sg`) for precise AST-based pattern matching and ripgrep-all (`rga
 
 ## Test Infrastructure Discovery (GATE - NOT OPTIONAL)
 
-<EXTREMELY-IMPORTANT>
-**CRITICAL: You MUST discover how to run REAL automated tests.**
-
-**NO TEST INFRASTRUCTURE = NO IMPLEMENTATION. This is a gate, not a finding.**
-
-REAL automated tests EXECUTE code and verify RUNTIME behavior.
-Grepping source files is NOT testing. Log checking is NOT testing.
+**NO TEST INFRASTRUCTURE = NO IMPLEMENTATION.** This is a gate, not a finding.
 
 See `references/constraints/real-test-enforcement.md` for the canonical REAL vs FAKE test tables.
 
@@ -269,23 +250,7 @@ DISCOVER test framework → FOUND?
 └─ NO → STOP. This is a BLOCKER. Cannot proceed without test strategy.
 ```
 
-**If no way to EXECUTE and VERIFY exists:**
-1. **STOP exploration** - do not proceed to clarify
-2. **Report to user** - "No test infrastructure found. This blocks TDD."
-3. **Propose solution** - "Should I add test infrastructure as Task 0?"
-4. **Wait for resolution** - Do not rationalize around this
-
-### Rationalization Prevention
-
-| Thought | Reality |
-|---------|---------|
-| "This project doesn't have tests" | Then add tests. That's Task 0. |
-| "It's a UI/DOM project, hard to test" | Use Playwright, ydotool, screenshot comparison |
-| "SPEC.md says manual testing" | That's wrong. Fix SPEC.md or ask user. |
-| "I can add tests later" | No. TDD means tests FIRST. |
-| "User won't want to set up tests" | Ask them. Don't assume. |
-| "Just this one feature without tests" | No exceptions. Ever. |
-</EXTREMELY-IMPORTANT>
+**If no test infrastructure found:** STOP → Report to user → Propose adding it as Task 0 → Wait for resolution.
 
 ### Project Test Framework
 
@@ -340,22 +305,7 @@ dbus-send --session --print-reply --dest=org.freedesktop.DBus \
 
 ## Code Path Discovery (CRITICAL FOR REAL TESTS)
 
-<EXTREMELY-IMPORTANT>
-**You MUST discover the actual code paths that need testing.**
-
-A test that exercises the wrong code path is a FAKE test. For example:
-- Testing HTTP when the app uses WebSocket
-- Testing sync calls when the app uses async
-- Testing direct function calls when users click UI
-
-### What to Discover
-
-| Question | Why It Matters |
-|----------|----------------|
-| What protocol/transport does the feature use? | Tests must use SAME protocol |
-| How does user input reach the code? | Tests must follow SAME path |
-| What does the user actually see? | Tests must verify SAME output |
-| What UI elements are involved? | Tests must interact with SAME elements |
+**Discover actual code paths that need testing.** A test exercising the wrong code path is a FAKE test (e.g., testing HTTP when the app uses WebSocket).
 
 ### Discovery Checklist
 
@@ -366,44 +316,9 @@ A test that exercises the wrong code path is a FAKE test. For example:
 [ ] UI components identified (panels, buttons, status bars, etc.)
 ```
 
-### Example Discoveries
-
-**Example 1: Web app with GraphQL**
-```markdown
-- **Protocol:** GraphQL over HTTP POST (NOT REST)
-- **Entry point:** User clicks "Save" button
-- **Data flow:** click → mutation → server response → UI update
-- **UI component:** Toast notification shows "Saved successfully"
-
-A REAL test must use GraphQL mutations, not REST endpoints.
-```
-
-**Example 2: CLI tool**
-```markdown
-- **Protocol:** Command-line invocation with arguments
-- **Entry point:** User runs `mytool --format json input.txt`
-- **Data flow:** argv → parser → processing → stdout
-- **UI component:** Terminal output
-
-A REAL test must invoke the CLI binary, not call internal functions.
-```
-
-**Example 3: Electron app with WebSocket**
-```markdown
-- **Protocol:** WebSocket (NOT HTTP)
-- **Entry point:** User highlights text in editor
-- **Data flow:** selection → WebSocket message → panel update
-- **UI component:** Panel shows status
-
-A REAL test must use WebSocket, not HTTP endpoint.
-```
-
-### Fake Test Prevention
-
-**If you skip code path discovery, you WILL write fake tests.** See `references/constraints/real-test-enforcement.md` for the full fake test detection tables and the Iron Law of REAL Tests.
+See `references/constraints/real-test-enforcement.md` for fake test detection tables.
 
 **Update SPEC.md with code path findings before proceeding.**
-</EXTREMELY-IMPORTANT>
 
 ## Key Files List Format
 
@@ -421,23 +336,13 @@ Each agent MUST return files in this format:
 | 5 | `tests/auth/login.test.ts:1` | Existing test patterns |
 ```
 
-## Why Skipping Hurts the Thing You Care About Most
-
-| Your Drive | Why You Skip | What Actually Happens | The Drive You Failed |
-|------------|-------------|----------------------|---------------------|
-| **Helpfulness** | "User is waiting, I'll explore less" | Shallow exploration produces wrong architecture | **Anti-helpful** |
-| **Competence** | "File names tell me enough" | Implementation details surprise you mid-build | **Incompetent** |
-| **Efficiency** | "I'll skip reading key files to save time" | You design against imagined code, rework everything | **Inefficient** |
-
-**The protocol is not overhead you pay. It is the service you provide.**
-
 ## Red Flags - STOP If You're About To:
 
 | Action | Why It's Wrong | Do Instead |
 |--------|----------------|------------|
 | Skip reading key files | You'll miss crucial context | Read every file on the list |
-| Ask design questions | You're conflating exploration with design | Save for clarify/design phases |
-| Propose approaches | You're jumping to decisions too early | Just document what exists |
+| Ask design questions | Exploration ≠ design | Save for clarify/design phases |
+| Propose approaches | Jumping to decisions too early | Just document what exists |
 | Start implementing | You must understand first | Complete exploration fully |
 
 ## Output
