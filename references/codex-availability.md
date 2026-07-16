@@ -168,6 +168,33 @@ use Codex when present, not to onboard it.
 
 ## Recording the outcome
 
+**This field is hook-enforced.** `dev-verify` / `ds-verify` declare a PreToolUse
+`phase-gate-guard.py` gate with:
+
+```
+GATE_REQUIRE_FIELDS=codex_second_pass:enabled|declined|unavailable
+```
+
+so Agent dispatch in the verify phase is blocked until `.planning/REVIEW_STATE.md`
+records one of those three values. This puts the second pass on the top tier of
+PHILOSOPHY's enforcement gradient (`hook-enforced > artifact check > advisory
+text`) — the review skill's prose can be compacted away or rationalized past, but
+the hook fires on every tool call.
+
+What the hook can and cannot prove:
+
+- **It can prove a disposition was recorded** rather than silently skipped.
+- **It cannot prove Codex ran** — `declined` and `unavailable` are legal, because
+  the second pass is opt-in and Codex is optional. That is the intended ceiling:
+  the gate enforces *honesty about what happened*, not *that Codex was used*.
+- **`error` is excluded from the allowed set**, so an errored second pass
+  structurally cannot reach verify. That is the "error is not an approval" rule,
+  enforced rather than narrated.
+
+Write **one** value, never the `a | b | c` template line — a literal placeholder
+matches no allowed value and the gate blocks it, which is the point: a pasted
+template is not a recorded decision.
+
 The consuming skill records what happened in `.planning/REVIEW_STATE.md`:
 
 | `codex_second_pass:` | Meaning |

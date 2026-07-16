@@ -984,6 +984,12 @@ Codex run actually returned a verdict.
 only ones. A failed second pass has no verdict, so it cannot support an
 approval; see [If the Codex second pass errored](#if-the-codex-second-pass-errored).
 
+**This is hook-enforced, not advisory.** ds-verify gates Agent dispatch on
+`GATE_REQUIRE_FIELDS=codex_second_pass:enabled|declined|unavailable`, so verify
+cannot start until this field records one of those three. Substitute a single
+value — pasting the `enabled | declined | unavailable` line verbatim matches
+nothing and the gate blocks it.
+
 **`status: APPROVED` is the structural gate field** — ds-verify declares a PreToolUse `phase-gate-guard.py` hook that blocks Agent dispatch until `.planning/REVIEW_STATE.md` shows `status: APPROVED`. While the review loop is unresolved (CHANGES_REQUIRED / ESCALATE), `status` is NOT `APPROVED`, so verification is structurally blocked.
 
 Immediately discover and load ds-verify:

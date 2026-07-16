@@ -856,6 +856,12 @@ Codex run actually returned a verdict.
 only ones. A failed second pass has no verdict, so it cannot support an
 approval; see [If the Codex second pass errored](#if-the-codex-second-pass-errored).
 
+**This is hook-enforced, not advisory.** dev-verify gates Agent dispatch on
+`GATE_REQUIRE_FIELDS=codex_second_pass:enabled|declined|unavailable`, so verify
+cannot start until this field records one of those three. Substitute a single
+value — pasting the `enabled | declined | unavailable` line verbatim matches
+nothing and the gate blocks it.
+
 The `status: APPROVED` line is the structural gate dev-verify checks — only an APPROVED review admits verification. On non-approved paths (CHANGES_REQUIRED / ESCALATE / BLOCKED) set `status:` to that verdict so the gate correctly blocks.
 
 Immediately invoke dev-verify:

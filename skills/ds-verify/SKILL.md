@@ -44,8 +44,9 @@ hooks:
           command: >-
             GATE_ARTIFACT=.planning/REVIEW_STATE.md
             GATE_STATUS=APPROVED
+            GATE_REQUIRE_FIELDS="codex_second_pass:enabled|declined|unavailable"
             GATE_DESCRIPTION="Review verdict"
-            GATE_REMEDY="Complete ds-review until REVIEW_STATE.md verdict is APPROVED; verification is gated until then."
+            GATE_REMEDY="Complete ds-review until REVIEW_STATE.md verdict is APPROVED; verification is gated until then. REVIEW_STATE.md must also record codex_second_pass: enabled (Codex ran) | declined (user opted out) | unavailable (Codex not installed/ready, or no git repo). An errored second pass (codex_second_pass: error) is an absence of evidence, not an approval — retry it or have the user explicitly decline."
             GATE_BLOCKED_TOOLS=Agent
             uv run python3 ${CLAUDE_PLUGIN_ROOT}/hooks/phase-gate-guard.py
 ---
