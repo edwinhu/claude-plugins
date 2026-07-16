@@ -1,7 +1,40 @@
-# Codex Availability Probe & Adversarial Review Invocation
+# Codex Availability Probe & Second-Pass Review Invocation
 
-Shared reference for skills that delegate adversarial review to the Codex plugin
-when available, with graceful fallback to in-process Claude reviewers.
+Shared reference for review skills that run an optional **Codex second pass** —
+an independent adversarial review that runs *after* the primary Claude reviewer
+approves, and *before* the phase writes its APPROVED verdict.
+
+Consumed by `skills/dev-review/SKILL.md` and `skills/ds-review/SKILL.md`.
+
+## The second pass is additive, never a substitute
+
+Codex does not replace the Claude reviewer. A Codex-instead-of-Claude review
+leaves the diff reviewed exactly once, which is the single-reviewer blind spot
+the second pass exists to close. The order is fixed:
+
+```
+primary Claude review (single | parallel)
+        │
+        ├── CHANGES_REQUIRED / ESCALATE / BLOCKED → fix loop (no second pass)
+        │
+        └── APPROVED (candidate verdict)
+                 │
+                 └── Codex second pass  ← optional, opt-in, this reference
+                          │
+                          ├── approve → write status: APPROVED → verify phase
+                          └── needs-attention (≥0.8) → CHANGES_REQUIRED → fix loop
+```
+
+**Why a different model family:** this is `skills/audit-fix-loop/SKILL.md` Iron
+Law 1 — "the auditor must not be the fixer" — applied to the model itself. A
+Claude reviewer auditing Claude's code shares its training and therefore its
+blind spots. Codex runs out-of-process on a different model family, so its
+misses are uncorrelated. Two reviewers that fail the same way are one reviewer.
+
+**Where it sits relative to the gate:** `.planning/REVIEW_STATE.md`'s
+`status: APPROVED` is the structural gate that dev-verify / ds-verify hook on.
+The second pass therefore runs BEFORE that line is written. A second pass that
+ran after the gate was already open would be decorative.
 
 ## Locate the Codex companion script
 
@@ -89,16 +122,24 @@ The companion emits a structured payload validated against
 | `findings[]` | Each has `severity`, `title`, `body`, `file`, `line_start`, `line_end`, `confidence` (0-1), `recommendation` |
 | `next_steps[]` | Suggested follow-ups                               |
 
-### Mapping to dev-review verdicts
+### Mapping to review verdicts
+
+Identical in dev-review and ds-review; the implement/verify phase names differ.
 
 | Codex verdict     | Map to               | Notes                                                                          |
 |-------------------|----------------------|--------------------------------------------------------------------------------|
-| `approve`         | `APPROVED`           | Proceed to dev-verify                                                          |
-| `needs-attention` with any finding `confidence >= 0.8` | `CHANGES_REQUIRED` | Forward findings to dev-implement                       |
-| `needs-attention` with all findings `confidence < 0.8` | `APPROVED` (with note) | Below the dev-review iron-law threshold — log findings to LEARNINGS.md as advisory |
+| `approve`         | `APPROVED`           | Write `status: APPROVED`, proceed to the verify phase                          |
+| `needs-attention` with any finding `confidence >= 0.8` | `CHANGES_REQUIRED` | Forward findings to the implement phase             |
+| `needs-attention` with all findings `confidence < 0.8` | `APPROVED` (with note) | Below the iron-law threshold — log findings to LEARNINGS.md as advisory |
 
 This preserves the **iron law of review**: only issues with confidence ≥ 80
 block. Codex reports confidence as 0-1 floats; multiply by 100 when displaying.
+
+**A Codex `CHANGES_REQUIRED` overrides the primary reviewer's APPROVED.** The
+primary does not get a veto over the second pass — if it did, the second pass
+would be decorative. This is the one place a later reviewer outranks an earlier
+one, and it is deliberate: the second pass exists precisely to catch what the
+primary missed.
 
 ### Trace findings to requirements
 
@@ -109,20 +150,58 @@ receiving the JSON, the calling skill is responsible for:
 2. Tagging each finding with the most likely REQ-ID (or `OUT-OF-SPEC`)
 3. Treating `OUT-OF-SPEC` findings as advisory unless the user opts in
 
-## Fallback Decision Tree
+## Availability Decision Tree
+
+The primary Claude review has already run and approved at this point — so an
+unavailable Codex means "no second opinion," never "no review."
 
 ```
 Codex script located?
-├── No  → Fallback: Single or Parallel Claude reviewer (existing flow)
+├── No  → record codex_second_pass: unavailable → write status: APPROVED (silently)
 └── Yes → Probe `setup --json`
-          ├── ready: false → Fallback (silently)
-          └── ready: true  → Offer Codex adversarial as RECOMMENDED option
-                              (user can still pick Claude path if preferred)
+          ├── ready: false → same as above (silently)
+          └── ready: true  → ask the user once (opt-in), then run or record `declined`
 ```
+
+Never prompt the user to install or authenticate Codex. The skill's job is to
+use Codex when present, not to onboard it.
+
+## Recording the outcome
+
+The consuming skill records what happened in `.planning/REVIEW_STATE.md`:
+
+| `codex_second_pass:` | Meaning |
+|----------------------|---------|
+| `enabled` | Codex ran and returned a verdict |
+| `declined` | Offered; user chose to approve without it |
+| `unavailable` | No script, probe not ready, or no git repo |
+| `error` | Codex ran but failed (non-zero exit / unparseable output) |
+
+Three rules keep this field honest:
+
+- **Never write `enabled` unless a Codex run actually returned a verdict.** The
+  field's whole purpose is to distinguish "Codex approved this" from "Codex
+  never ran"; a fabricated `enabled` makes the record worse than absent.
+- **`error` is not an approval.** An unrun reviewer is not a passing reviewer.
+  `error` is an absence of evidence — neither approval nor rejection — so it is
+  **not a legal value under `status: APPROVED`**. Only `enabled`, `declined`,
+  and `unavailable` are. An `error` sets `status: BLOCKED` and asks the user to
+  retry or explicitly decline; only that decision reopens the path forward.
+- **`unavailable` and `error` are different facts.** `unavailable` means Codex
+  was never reachable (not installed, probe not ready, no git repo) and is
+  benign — the primary review stands. `error` means Codex was reached and
+  failed, which is a broken reviewer, not an absent one. Collapsing the two
+  hides failures behind a silent skip.
 
 ## Iteration tracking
 
-Codex adversarial review participates in the same `REVIEW_STATE.md` loop as
-Claude reviewers — increment iteration on `CHANGES_REQUIRED`, escalate at
-iteration 3. Re-runs go through Codex again (not a swap to Claude mid-loop)
-unless Codex becomes unavailable between runs.
+The second pass participates in the same `REVIEW_STATE.md` loop as Claude
+reviewers — increment iteration on `CHANGES_REQUIRED`, escalate at iteration 3.
+
+**Decide once per loop, not once per iteration.** The opt-in answer is stored in
+`codex_second_pass:` and honored on subsequent iterations without re-asking;
+only `unavailable` is re-probed (Codex may have been installed since). Asking on
+every fix iteration turns an opt-in into nagging.
+
+On each iteration the full order repeats: primary review first, second pass only
+if the primary approves.

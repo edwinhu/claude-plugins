@@ -50,9 +50,9 @@ If the message could be EITHER a new topic OR part of the review, ask before ass
 ## Contents
 
 - [Prerequisites - Test Output Gate](#prerequisites---test-output-gate)
-- [Review Strategy Choice](#review-strategy-choice)
-- [Codex Adversarial Review](#codex-adversarial-review) (default when Codex is installed)
-- [Parallel Review (Thorough)](#parallel-review-thorough) (Claude-only fallback)
+- [Review Strategy Choice](#review-strategy-choice) (picks the primary reviewer)
+- [Codex Second Pass](#codex-second-pass) (optional second opinion before any APPROVED verdict)
+- [Parallel Review (Thorough)](#parallel-review-thorough)
 - [The Iron Law of Review](#the-iron-law-of-review) (single Claude reviewer path)
 - [Review Focus Areas](#review-focus-areas)
 - [Confidence Scoring](#confidence-scoring)
@@ -132,7 +132,14 @@ If no test output is found, STOP and return to /dev-implement.
 
 ## Review Strategy Choice
 
-After verifying test output in LEARNINGS.md, choose review strategy.
+After verifying test output in LEARNINGS.md, choose the **primary reviewer**.
+
+This choice picks who reviews FIRST. It is not a choice about whether Codex
+runs — Codex is a *second pass* over whatever the primary reviewer approves
+(see [Codex Second Pass](#codex-second-pass)). The two are additive, never
+alternatives: a Codex pass that replaced Claude would leave the diff reviewed
+exactly once, which is the single-reviewer blind spot the second pass exists
+to close.
 
 **Skip this choice when:**
 - Trivial changes (< 50 LOC, single file)
@@ -140,47 +147,7 @@ After verifying test output in LEARNINGS.md, choose review strategy.
 - Automated refactoring (rename, extract)
 - Internal utility functions (not user-facing or security-sensitive)
 
-### Step 1: Probe Codex availability (silent)
-
-Codex provides an out-of-process adversarial reviewer that uses a different
-model family than Claude — the diversity catches issues a Claude-reviewing-Claude
-loop would miss. When installed and authenticated, it is the **default**
-adversarial path. When unavailable, fall back to the existing Claude-based
-flow without prompting the user about installation.
-
-Read `${CLAUDE_SKILL_DIR}/../../references/codex-availability.md` for the full
-probe and invocation contract. Execute the probe before asking the user:
-
-```bash
-CODEX_SCRIPT=$(find "$HOME/.claude/plugins/cache/openai-codex/codex" -maxdepth 3 -name codex-companion.mjs -type f 2>/dev/null | sort -rV | head -1)
-if [ -n "$CODEX_SCRIPT" ]; then
-  node "$CODEX_SCRIPT" setup --json 2>/dev/null | jq -r '.ready // false'
-else
-  echo "false"
-fi
-```
-
-Set `CODEX_READY=true` only when the probe prints `true`. Otherwise
-`CODEX_READY=false` and skip Codex entirely — do not announce its absence.
-
-### Step 2: Ask the user
-
-**If `CODEX_READY=true`:**
-
-```python
-AskUserQuestion(questions=[{
-  "question": "How should we review this implementation?",
-  "header": "Review Strategy",
-  "options": [
-    {"label": "Codex adversarial review (Recommended)", "description": "Out-of-process adversarial review via Codex. Different model family from Claude — catches issues a Claude-on-Claude loop misses. Default for adversarial review."},
-    {"label": "Single Claude reviewer", "description": "Combined Claude review covering spec compliance and code quality. Faster, lower overhead. Use when Codex is overkill."},
-    {"label": "Parallel Claude review (Thorough)", "description": "Spawn 3 specialized Claude reviewers (Security, Performance, Tests). Use when Codex is unavailable or you want multi-perspective Claude review."}
-  ],
-  "multiSelect": false
-}])
-```
-
-**If `CODEX_READY=false`:**
+**Ask the user:**
 
 ```python
 AskUserQuestion(questions=[{
@@ -198,34 +165,89 @@ AskUserQuestion(questions=[{
 
 | Choice | Go to |
 |--------|-------|
-| Codex adversarial review | [Codex Adversarial Review](#codex-adversarial-review) |
 | Single (Claude) reviewer | [The Iron Law of Review](#the-iron-law-of-review) |
 | Parallel (Claude) review | [Parallel Review (Thorough)](#parallel-review-thorough) |
 
+Both paths converge on [Phase Complete](#phase-complete), which runs the Codex
+second pass before any APPROVED verdict is written.
+
 ---
 
-## Codex Adversarial Review
+## Codex Second Pass
 
-Use this section when the user chose **Codex adversarial review**.
+**When this runs:** after the primary reviewer (single or parallel) returns
+APPROVED, and BEFORE `status: APPROVED` is written to `.planning/REVIEW_STATE.md`.
+It never runs on CHANGES_REQUIRED, ESCALATE, or BLOCKED — there is nothing to
+second-guess when the primary reviewer already found blocking issues; fix those
+first and the second pass runs on the next iteration.
+
+**Why it exists:** the primary reviewer is Claude reviewing Claude's code. Codex
+is a different model family in a different process, so its blind spots are not
+correlated with the implementer's. This is the audit-fix-loop Iron Law ("the
+auditor must not be the fixer") applied to the model itself.
 
 > **Reference:** See `references/codex-availability.md` for the full invocation
 > contract, JSON schema, and verdict mapping table.
 
-### 1. Prerequisites Check
+### 1. Decide once per review loop, not once per iteration
 
-Before invoking Codex, verify (same as the other review paths):
+Read `.planning/REVIEW_STATE.md`. If it already carries a `codex_second_pass:`
+value, honor it and do NOT re-ask:
 
-1. **Test evidence exists** — LEARNINGS.md contains actual test output
-2. **E2E evidence for UI changes** — user-facing changes have E2E test output
-3. **SPEC.md exists** — for REQ-ID tagging of findings post-hoc
-4. **Git repo present** — Codex adversarial review is git-diff scoped
+| Stored value | Action |
+|--------------|--------|
+| `enabled` | Probe (step 2), then run without re-asking — skip step 3 |
+| `declined` | Skip the second pass entirely → Phase Complete's APPROVED write |
+| `unavailable` / `error` | Re-probe (step 2) — Codex may have been installed or fixed since |
+| absent | Probe, then ask (steps 2-3) |
 
-If any prerequisite fails, STOP and return BLOCKED to /dev-implement.
+Asking on every fix iteration turns an opt-in into nagging, and a user who
+answers "no" three times has been asked three times too many.
 
-### 2. Estimate Scope and Choose Wait vs Background
+Probe on every iteration even when the answer is stored — `enabled` records a
+user's consent, not Codex's continued availability.
+
+### 2. Probe Codex availability (silent)
 
 ```bash
-# Working-tree review
+CODEX_SCRIPT=$(find "$HOME/.claude/plugins/cache/openai-codex/codex" -maxdepth 3 -name codex-companion.mjs -type f 2>/dev/null | sort -rV | head -1)
+if [ -n "$CODEX_SCRIPT" ]; then
+  node "$CODEX_SCRIPT" setup --json 2>/dev/null | jq -r '.ready // false'
+else
+  echo "false"
+fi
+```
+
+If the probe does not print `true`: record `codex_second_pass: unavailable` and
+proceed to Phase Complete's APPROVED write. Do **not** announce Codex's absence
+and do **not** prompt the user to install it — this skill's job is to use Codex
+when present, not to onboard it.
+
+### 3. Ask the user (only when the probe printed `true`)
+
+```python
+AskUserQuestion(questions=[{
+  "question": "Primary review passed. Run a Codex second pass before verify?",
+  "header": "Second Pass",
+  "options": [
+    {"label": "Run Codex second pass (Recommended)", "description": "Independent adversarial review via Codex — a different model family in a separate process, so its blind spots don't overlap with Claude's. Findings at >=80 confidence re-enter the fix loop."},
+    {"label": "Skip — approve now", "description": "Accept the primary review's APPROVED verdict and proceed to dev-verify. Faster; the diff is reviewed by Claude only."}
+  ],
+  "multiSelect": false
+}])
+```
+
+Record the answer in `.planning/REVIEW_STATE.md` as `codex_second_pass: enabled`
+or `codex_second_pass: declined` before acting on it.
+
+### 4. Prerequisites
+
+Codex adversarial review is **git-diff scoped**. If there is no git repo, record
+`codex_second_pass: unavailable` and proceed — do not fabricate a scope.
+
+### 5. Estimate scope and choose wait vs background
+
+```bash
 git status --short --untracked-files=all
 git diff --shortstat --cached
 git diff --shortstat
@@ -234,7 +256,10 @@ git diff --shortstat
 Wait when the diff is clearly tiny (1-2 files, no untracked dir-sized changes).
 Otherwise launch in background.
 
-### 3. Invoke Codex
+### 6. Invoke Codex
+
+Each Bash call runs in a fresh shell, so `$CODEX_SCRIPT` from the probe does not
+survive — re-resolve it in the same command that uses it.
 
 **Foreground (small diff):**
 
@@ -245,18 +270,19 @@ node "$CODEX_SCRIPT" adversarial-review --wait
 
 **Background (anything bigger):**
 
-Launch with `Bash(..., run_in_background: true)` and tell the user:
-"Codex adversarial review started in the background. Check `/codex:status` for progress."
+Launch the same command with `Bash(..., run_in_background: true)` and tell the user:
+"Codex second pass started in the background. Check `/codex:status` for progress."
 
-Then await completion notification before proceeding to step 4.
+Then await completion before proceeding to step 7.
 
 **Optional focus text** — append SPEC.md context to weight the review:
 
 ```bash
+CODEX_SCRIPT=$(find "$HOME/.claude/plugins/cache/openai-codex/codex" -maxdepth 3 -name codex-companion.mjs -type f 2>/dev/null | sort -rV | head -1)
 node "$CODEX_SCRIPT" adversarial-review --wait "focus: REQ-AUTH-01 token rotation under retry"
 ```
 
-### 4. Parse Verdict
+### 7. Parse verdict
 
 Codex returns JSON validated against its review-output schema. Top-level fields:
 `verdict` (`approve` | `needs-attention`), `summary`, `findings[]`, `next_steps[]`.
@@ -266,47 +292,45 @@ Each finding has `severity`, `title`, `body`, `file`, `line_start`, `line_end`,
 **Apply the iron law: only `confidence >= 0.8` findings block.** Multiply by 100
 when displaying alongside Claude-style scores.
 
-| Codex result | dev-review verdict |
-|--------------|--------------------|
-| `verdict: approve` | APPROVED |
-| `needs-attention` + any finding ≥ 0.8 confidence | CHANGES_REQUIRED |
-| `needs-attention` + all findings < 0.8 confidence | APPROVED (log advisory findings to LEARNINGS.md) |
+| Codex result | Second-pass outcome |
+|--------------|---------------------|
+| `verdict: approve` | APPROVED — proceed to Phase Complete's APPROVED write |
+| `needs-attention` + any finding ≥ 0.8 confidence | CHANGES_REQUIRED — overrides the primary reviewer's APPROVED |
+| `needs-attention` + all findings < 0.8 | APPROVED (log advisory findings to LEARNINGS.md) |
 
-### 5. Tag Findings to Requirements
+**A Codex CHANGES_REQUIRED overrides the primary APPROVED.** The primary
+reviewer does not get a veto over the second pass — if it did, the second pass
+would be decorative.
+
+If Codex fails to run (non-zero exit, unparseable output): record
+`codex_second_pass: error` and report the failure to the user. Do **not**
+silently treat a broken second pass as an approval — an unrun reviewer is not a
+passing reviewer.
+
+### 8. Tag findings to requirements
 
 Codex doesn't know SPEC.md REQ-IDs. For each blocking finding:
 
 1. Read `.planning/SPEC.md`
 2. Tag the finding with the most likely REQ-ID (or `OUT-OF-SPEC`)
-3. `OUT-OF-SPEC` findings are advisory unless user opts in
+3. `OUT-OF-SPEC` findings are advisory unless the user opts in
 
-### 6. Report
+### 9. Report
 
 Use the same output structure as `## Required Output Structure` below, with
-**Reviewer: Codex (adversarial)** in the header. Each issue includes the
-Codex confidence (×100) and the REQ-ID you tagged in step 5.
+**Reviewer: Codex (second pass)** in the header. Each issue includes the Codex
+confidence (×100) and the REQ-ID you tagged in step 8.
 
-### 7. Iteration & Re-Review
+### 10. Iteration & re-review
 
-Codex adversarial review participates in the same `REVIEW_STATE.md` loop as
-Claude reviewers — increment iteration on CHANGES_REQUIRED, escalate at
-iteration 3. **Re-runs stay on Codex** unless it becomes unavailable between
-runs (re-probe each iteration).
+The second pass participates in the same `REVIEW_STATE.md` loop as Claude
+reviewers — a blocking second pass increments iteration and returns
+CHANGES_REQUIRED, escalating at iteration 3 like any other verdict.
 
-The "Iron Law of Re-Review" still applies: implementer claims "fixed" → main
-chat re-invokes Codex via the same command — no spot-checks.
-
-### Phase Complete (Codex Adversarial)
-
-After Codex review completes:
-
-**If APPROVED:** Immediately invoke the dev-verify skill:
-
-Read `${CLAUDE_SKILL_DIR}/../../skills/dev-verify/SKILL.md` and follow its instructions.
-
-**If CHANGES_REQUIRED:** Return to `/dev-implement` with the parsed findings.
-
-**If BLOCKED (test evidence missing):** Return to `/dev-implement` to collect test evidence.
+On the next iteration the order repeats in full: primary review runs first, and
+the second pass runs again only if the primary approves. The "Iron Law of
+Re-Review" applies to Codex too — the implementer claims "fixed", main chat
+re-invokes the full review, no spot-checks.
 
 ---
 
@@ -513,17 +537,18 @@ All 3 reviewers approved with no issues >= 80 confidence.
 X critical and Y important issues must be addressed. Return to /dev-implement.
 ```
 
-## Phase Complete (Parallel Review)
+## After Parallel Review
 
-After parallel review completes:
+Parallel review produces a *primary* verdict — it is not a terminal state. Do
+NOT invoke dev-verify or write `status: APPROVED` from here.
 
-**If APPROVED:** Immediately invoke the dev-verify skill:
+Go to [Phase Complete](#phase-complete) and follow it for every verdict.
+Phase Complete is the single authority that runs the Codex second pass, writes
+`.planning/REVIEW_STATE.md`, and invokes dev-verify.
 
-Read `${CLAUDE_SKILL_DIR}/../../skills/dev-verify/SKILL.md` and follow its instructions.
-
-**If CHANGES REQUIRED:** Return to `/dev-implement` to fix reported issues.
-
-**If BLOCKED (test evidence missing):** Return to `/dev-implement` to collect test evidence.
+A branch-local "APPROVED → dev-verify" shortcut would let the parallel path
+reach verification without the second pass ever running, being declined, or
+being recorded — which is exactly the bypass the second pass exists to prevent.
 
 ---
 
@@ -789,12 +814,25 @@ affects: []             # read-only review; fixes happen in dev-implement
 verdict: APPROVED | CHANGES_REQUIRED | ESCALATE | BLOCKED
 iterations: N
 issues-found: X (Y critical, Z important)
+codex-second-pass: enabled | declined | unavailable | error
 ---
 ```
 
 After review completes, handle verdict-specific transitions:
 
 ### If APPROVED (no issues >= 80 confidence)
+
+**STOP — run the [Codex Second Pass](#codex-second-pass) first.** A primary
+APPROVED is a candidate verdict, not a final one. Writing `status: APPROVED`
+before the second pass runs would hand dev-verify a gate that no second reviewer
+ever saw — the second pass would be decorative, and the diff would ship reviewed
+once by the same model family that wrote it.
+
+Order of operations:
+
+1. Run the Codex second pass (it self-skips when Codex is unavailable or declined).
+2. If it returns **CHANGES_REQUIRED**, follow [If CHANGES REQUIRED](#if-changes-required-issues--80-confidence-found-iteration--3) instead of this section.
+3. Only if it returns **APPROVED** (or self-skipped), write the state below.
 
 Mark review complete in `.planning/REVIEW_STATE.md`:
 
@@ -805,15 +843,66 @@ iteration: [N]
 max_iterations: 3
 last_review_date: [date]
 issues_found_count: 0
+codex_second_pass: enabled | declined | unavailable
 verdict: APPROVED
 ---
 ```
+
+`codex_second_pass` records what actually happened, so a later reader can tell
+"Codex approved this" from "Codex never ran." Never write `enabled` unless a
+Codex run actually returned a verdict.
+
+**`error` is not a valid value under `status: APPROVED`** — those three are the
+only ones. A failed second pass has no verdict, so it cannot support an
+approval; see [If the Codex second pass errored](#if-the-codex-second-pass-errored).
 
 The `status: APPROVED` line is the structural gate dev-verify checks — only an APPROVED review admits verification. On non-approved paths (CHANGES_REQUIRED / ESCALATE / BLOCKED) set `status:` to that verdict so the gate correctly blocks.
 
 Immediately invoke dev-verify:
 
 Read `${CLAUDE_SKILL_DIR}/../../skills/dev-verify/SKILL.md` and follow its instructions.
+
+### If the Codex second pass errored
+
+Codex ran but produced no verdict (non-zero exit, unparseable output). **This is
+not an approval and not a rejection — it is an absence of evidence.** Do NOT
+write `status: APPROVED` and do NOT invoke dev-verify.
+
+Record the attempt and leave the gate closed:
+
+```yaml
+---
+status: BLOCKED
+iteration: [N]          # unchanged — no review verdict was produced
+max_iterations: 3
+last_review_date: [date]
+issues_found_count: [count from the primary review]
+codex_second_pass: error
+verdict: BLOCKED
+---
+```
+
+Report the failure to the user and ask how to proceed:
+
+```python
+AskUserQuestion(questions=[{
+  "question": "The Codex second pass failed to produce a verdict. How should we proceed?",
+  "header": "Second Pass",
+  "options": [
+    {"label": "Retry the second pass", "description": "Re-run Codex. Transient failures (auth expiry, a dropped thread) usually clear on a retry."},
+    {"label": "Approve without it", "description": "Record codex_second_pass: declined and proceed to dev-verify on the primary review alone. The diff is reviewed by Claude only."}
+  ],
+  "multiSelect": false
+}])
+```
+
+- **Retry** → return to [Codex Second Pass](#codex-second-pass) step 2.
+- **Approve without it** → rewrite `codex_second_pass: declined` and follow
+  [If APPROVED](#if-approved-no-issues--80-confidence) from the top.
+
+Only an explicit user decision converts an `error` into a path forward. Silently
+downgrading it to an approval is the fabricated-verdict failure this skill exists
+to prevent.
 
 ### If CHANGES REQUIRED (issues >= 80 confidence found, iteration < 3)
 
@@ -826,11 +915,19 @@ iteration: [N+1]
 max_iterations: 3
 last_review_date: [date]
 issues_found_count: [count]
+codex_second_pass: enabled | declined | unavailable
 verdict: CHANGES_REQUIRED
 ---
 ```
 
+Carry `codex_second_pass` forward unchanged — the decision is made once per
+review loop, not re-asked on each iteration.
+
 Return to `/dev-implement` with specific issues. **Implementer MUST re-invoke /dev-review after fixes.**
+
+When the blocking findings came from the second pass, say so in the handoff
+("Codex second pass, REQ-AUTH-01, confidence 92") — the implementer needs to
+know which reviewer to satisfy.
 
 **Critical:** When implementer returns claiming "fixed", you MUST re-run the FULL review. No shortcuts.
 
@@ -874,7 +971,8 @@ Return immediately to `/dev-implement` to collect test evidence. Do NOT incremen
 
 | Verdict | Next Action | Iteration Counter |
 |---------|-------------|-------------------|
-| APPROVED | Invoke /dev-verify immediately, mark task `[x]` in PLAN.md | Reset to 1 for next task |
+| APPROVED (primary) | Run the [Codex Second Pass](#codex-second-pass) before writing `status: APPROVED` | No change (not a terminal verdict) |
+| APPROVED (second pass done/skipped) | Invoke /dev-verify immediately, mark task `[x]` in PLAN.md | Reset to 1 for next task |
 | CHANGES REQUIRED | Return to /dev-implement, implementer fixes then re-invokes /dev-review | Increment |
 | ESCALATE | Ask user for direction | Keep at max |
 | BLOCKED | Return to /dev-implement for test evidence | No change (no review ran) |
