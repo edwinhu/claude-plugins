@@ -65,7 +65,7 @@ verdict: APPROVED
 ---
 """
 
-FIELDS = 'codex_second_pass:enabled|declined|unavailable'
+FIELDS = 'codex_second_pass:completed|declined|unavailable'
 
 with tempfile.TemporaryDirectory() as td:
     base = {'GATE_STATUS': 'APPROVED', 'GATE_BLOCKED_TOOLS': 'Agent'}
@@ -83,7 +83,7 @@ with tempfile.TemporaryDirectory() as td:
     check('missing artifact still blocked', not allowed)
 
     # --- The new check: every legal disposition passes ---
-    for value in ('enabled', 'declined', 'unavailable'):
+    for value in ('completed', 'declined', 'unavailable'):
         art = write_state(td, APPROVED_WITH.format(value=value))
         allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art, 'GATE_REQUIRE_FIELDS': FIELDS})
         check(f'codex_second_pass: {value} -> allowed', allowed)
@@ -98,6 +98,27 @@ with tempfile.TemporaryDirectory() as td:
     art = write_state(td, APPROVED_WITH.format(value='error'))
     allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art, 'GATE_REQUIRE_FIELDS': FIELDS})
     check('codex_second_pass: error -> blocked (not an approval)', not allowed)
+
+    # --- a launch is not a verdict: `requested` must never admit verify ---
+    # This is the partial-failure/resume bypass: Codex is still running, or
+    # crashed, or the session died mid-pass. Nothing answered.
+    art = write_state(td, APPROVED_WITH.format(value='requested'))
+    allowed, reason = run_hook({**base, 'GATE_ARTIFACT': art, 'GATE_REQUIRE_FIELDS': FIELDS})
+    check('codex_second_pass: requested -> blocked (launch is not an answer)', not allowed)
+    check('requested block reason names the field', 'codex_second_pass' in reason)
+
+    # --- the old `enabled` state is retired and must not admit verify either ---
+    art = write_state(td, APPROVED_WITH.format(value='enabled'))
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art, 'GATE_REQUIRE_FIELDS': FIELDS})
+    check('retired codex_second_pass: enabled -> blocked', not allowed)
+
+    # --- the pending status alone blocks, whatever the field says ---
+    # Belt and braces: dev-review writes SECOND_PASS_PENDING before launching, so
+    # even a stale APPROVED from a previous task cannot leave the gate open.
+    for pending_status in ('SECOND_PASS_PENDING', 'IN_REVIEW'):
+        art = write_state(td, f"---\nstatus: {pending_status}\ncodex_second_pass: requested\n---\n")
+        allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art, 'GATE_REQUIRE_FIELDS': FIELDS})
+        check(f'status: {pending_status} -> blocked', not allowed)
 
     # --- an un-substituted SKILL.md template is not a real answer ---
     art = write_state(td, APPROVED_WITH.format(value='enabled | declined | unavailable'))
@@ -143,7 +164,7 @@ with tempfile.TemporaryDirectory() as td:
     art = write_state(td, """---
 status: APPROVED
 prior_review:
-  codex_second_pass: enabled
+  codex_second_pass: completed
 ---
 """)
     allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
@@ -162,7 +183,7 @@ codex_second_pass: 'enabled # error'
     art = write_state(td, """---
 status: APPROVED
 codex_second_pass: error
-codex_second_pass: enabled
+codex_second_pass: completed
 ---
 """)
     allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
@@ -179,7 +200,7 @@ codex_second_pass:
     check('non-scalar codex_second_pass -> blocked', not allowed)
 
     # No frontmatter at all.
-    art = write_state(td, "status: APPROVED\ncodex_second_pass: enabled\n")
+    art = write_state(td, "status: APPROVED\ncodex_second_pass: completed\n")
     allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
     check('no frontmatter delimiters -> blocked', not allowed)
 
@@ -222,10 +243,10 @@ codex_second_pass: "decli\\ned"
     check('escape-synthesized "decli\\ned" -> blocked', not allowed)
 
     # A plain scalar continues onto indented lines: this value is
-    # `enabled nope`, not `enabled`. (Verified against pyyaml.)
+    # `completed nope`, not `completed`. (Verified against pyyaml.)
     art = write_state(td, """---
 status: APPROVED
-codex_second_pass: enabled
+codex_second_pass: completed
   nope
 ---
 """)
@@ -293,7 +314,7 @@ codex_second_pass: 'declined'   # user opted out
     allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
     check('embedded --- in status scalar -> blocked', not allowed)
 
-    art = write_state(td, "---\nstatus: APPROVED\ncodex_second_pass: enabled---nope\n---\n")
+    art = write_state(td, "---\nstatus: APPROVED\ncodex_second_pass: completed---nope\n---\n")
     allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
     check('embedded --- in codex_second_pass -> blocked', not allowed)
 
@@ -323,7 +344,7 @@ codex_second_pass: 'declined'   # user opted out
     allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
     check('anchor-hidden multiline quote swallows status -> blocked', not allowed)
 
-    art = write_state(td, "---\nstatus: APPROVED\nbroken: [\ncodex_second_pass: enabled\n---\n")
+    art = write_state(td, "---\nstatus: APPROVED\nbroken: [\ncodex_second_pass: completed\n---\n")
     allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
     check('unterminated flow before field gate -> blocked', not allowed)
 
@@ -339,7 +360,7 @@ codex_second_pass: declined
     allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
     check('block scalar sibling -> allowed (content is indented)', allowed)
 
-    art = write_state(td, "---\nstatus: APPROVED\nprior:\n  note: x\ncodex_second_pass: enabled\n---\n")
+    art = write_state(td, "---\nstatus: APPROVED\nprior:\n  note: x\ncodex_second_pass: completed\n---\n")
     allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
     check('nested mapping sibling -> allowed', allowed)
 
@@ -477,7 +498,7 @@ with tempfile.TemporaryDirectory() as td:
             value = got[0].split('=', 1)[1]
             check(f'{skill}: all three dispositions reach the hook',
                   set(value.split(':', 1)[1].split('|')) ==
-                  {'enabled', 'declined', 'unavailable'})
+                  {'completed', 'declined', 'unavailable'})
         check(f'{skill}: no stray shell errors from the assignment',
               'command not found' not in proc.stderr)
 
