@@ -302,6 +302,104 @@ codex_second_pass: 'declined'   # user opted out
     allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
     check('unterminated frontmatter -> blocked', not allowed)
 
+    # A construct opened on an earlier line captures the lines below it, so the
+    # `status:` here is NOT a top-level key — it belongs to `broken`.
+    art = write_state(td, "---\nbroken: [\nstatus: APPROVED\n---\n")
+    allowed, reason = run_hook({**base, 'GATE_ARTIFACT': art})
+    check('unterminated flow collection swallows status -> blocked', not allowed)
+    check('unreadable artifact says so', 'not readable' in reason)
+
+    art = write_state(td, "---\nbroken: 'oops\nstatus: APPROVED\n---\n")
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check('unterminated quote swallows status -> blocked', not allowed)
+
+    # A YAML tag/anchor sits before the value and hides the opener from a
+    # first-character check: pyyaml reads this whole thing as `broken`.
+    art = write_state(td, "---\nbroken: !!str 'oops\nstatus: APPROVED # close'\n---\n")
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check('tag-hidden multiline quote swallows status -> blocked', not allowed)
+
+    art = write_state(td, "---\nbroken: &a 'oops\nstatus: APPROVED # close'\n---\n")
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check('anchor-hidden multiline quote swallows status -> blocked', not allowed)
+
+    art = write_state(td, "---\nstatus: APPROVED\nbroken: [\ncodex_second_pass: enabled\n---\n")
+    allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
+    check('unterminated flow before field gate -> blocked', not allowed)
+
+    # ...and the readability rule must not reject legitimate artifacts.
+    art = write_state(td, """---
+status: APPROVED
+iteration: 2
+notes: |
+  a block scalar's content is indented, so it captures nothing at top level
+codex_second_pass: declined
+---
+""")
+    allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
+    check('block scalar sibling -> allowed (content is indented)', allowed)
+
+    art = write_state(td, "---\nstatus: APPROVED\nprior:\n  note: x\ncodex_second_pass: enabled\n---\n")
+    allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
+    check('nested mapping sibling -> allowed', allowed)
+
+    # `status:APPROVED` (no space) is NOT a mapping — YAML reads the whole line
+    # as the plain scalar "status:APPROVED", so the document has no status key.
+    # Matching it would open the gate on a doc that never recorded a status.
+    art = write_state(td, "---\nstatus:APPROVED\n---\n")
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check('status:APPROVED (no space after colon) -> blocked', not allowed)
+
+    art = write_state(td, "---\nstatus:'APPROVED'\n---\n")
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check("status:'APPROVED' (no space, quoted) -> blocked", not allowed)
+
+    art = write_state(td, "---\nstatus: APPROVED\ncodex_second_pass:enabled\n---\n")
+    allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
+    check('codex_second_pass:enabled (no space) -> blocked', not allowed)
+
+    # YAML requires whitespace before a trailing comment: `'APPROVED'#x` is a
+    # syntax error, so PyYAML never assigns status a value here.
+    art = write_state(td, "---\nstatus: 'APPROVED'#x\n---\n")
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check("quoted status with unspaced '#' -> blocked", not allowed)
+
+    art = write_state(td, '---\nstatus: "APPROVED"#x\n---\n')
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check('double-quoted status with unspaced # -> blocked', not allowed)
+
+    art = write_state(td, "---\nstatus: APPROVED\ncodex_second_pass: 'enabled'#x\n---\n")
+    allowed, _ = run_hook({**gated, 'GATE_ARTIFACT': art})
+    check("field with unspaced '#' -> blocked", not allowed)
+
+    # ...but a properly separated comment is still a comment.
+    art = write_state(td, "---\nstatus: 'APPROVED' #x\n---\n")
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check("quoted status with spaced '#' -> allowed", allowed)
+
+    # A tab after the colon is valid separation, unlike a missing space.
+    art = write_state(td, "---\nstatus:\tAPPROVED\n---\n")
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check('status:<tab>APPROVED -> allowed', allowed)
+
+    # Sibling keys sharing a prefix must not collide.
+    art = write_state(td, "---\nstatus_extra: APPROVED\n---\n")
+    allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+    check('status_extra does not satisfy status gate -> blocked', not allowed)
+
+    # Decorated YAML (anchor, tag, alias, flow collection) is not a plain
+    # scalar. The hook fails closed rather than resolving it — REVIEW_STATE.md
+    # never legitimately uses these, and a resolver is surface to get wrong.
+    for label, body in [
+        ('anchor', "---\nstatus: &a APPROVED\n---\n"),
+        ('tag', "---\nstatus: !!str APPROVED\n---\n"),
+        ('alias', "---\nx: &a APPROVED\nstatus: *a\n---\n"),
+        ('flow seq', "---\nstatus: [APPROVED]\n---\n"),
+    ]:
+        art = write_state(td, body)
+        allowed, _ = run_hook({**base, 'GATE_ARTIFACT': art})
+        check(f'decorated YAML ({label}) -> blocked (fail closed)', not allowed)
+
     # An INDENTED `---` is a scalar continuation, not a delimiter: pyyaml reads
     # this status as `APPROVED ---`.
     art = write_state(td, "---\nstatus: APPROVED\n  ---\n")

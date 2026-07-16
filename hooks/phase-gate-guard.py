@@ -84,14 +84,56 @@ verified in tests/phase_gate_guard_test.py:
     `APPROVED`. Same for quoted scalars with escapes or trailing junk.
   - STRICTER: duplicate keys now block instead of resolving to one of them.
     Ambiguous evidence is not evidence.
+  - STRICTER (bug fix): `status:APPROVED` no longer matches. A block mapping
+    needs whitespace after the colon, so YAML reads that line as the plain
+    scalar "status:APPROVED" — the document has no `status` key at all, and the
+    old reader handed back `APPROVED` from it.
   - LOOSER (YAML correctness): `status: APPROVED # signed off` now passes. YAML
     says that value is `APPROVED`; the old reader compared the whole string
     including the comment and blocked. A quoted `'APPROVED # invalid'` still
     blocks — inside quotes the '#' is literal text, not a comment.
+
+  - STRICTER: the frontmatter must be a FLAT mapping of scalars. If any
+    top-level line opens a flow collection or leaves a quote unterminated, the
+    whole block is refused — such a construct captures the lines beneath it, so
+    `broken: [` followed by `status: APPROVED` has no top-level `status` at all,
+    yet a line-wise reader would find one. Indented content (block scalars,
+    nested mappings) is fine: it cannot masquerade as a top-level key.
+
+Decorated YAML — anchors (`&a`), tags (`!!str`), aliases (`*a`), flow
+collections (`[x]`, `{k: v}`) — is not a plain scalar and fails closed. Gate
+artifacts never legitimately use them, and a resolver for them is surface to get
+subtly wrong. One accepted leniency: a stray trailing tab (`status: APPROVED\t`)
+is read as `APPROVED` where PyYAML rejects the document outright; it cannot
+smuggle a different value (`status: APPROVED\tx` still blocks).
+
+tests/phase_gate_guard_differential_test.py pins all of this against PyYAML over
+a generated corpus: the reader must never accept a value PyYAML disagrees with.
+
+KNOWN RESIDUAL — the reader can accept a gate value from a document that is
+malformed SOMEWHERE ELSE. Its checks cover every column-0 line, but indented
+lines are skipped by design (they belong to a parent key), so:
+
+    status: APPROVED
+    prior:
+      broken: 'x' junk        <- invalid YAML; PyYAML rejects the whole document
+
+still reads `status: APPROVED`. Closing this means validating the entire
+document — i.e. a real YAML parser, which is the dependency this hook avoids on
+purpose (it fires on every tool call; a gate that must resolve a package before
+answering can fail OPEN, which is strictly worse than this).
+
+The residual is bounded and does not fabricate verdicts. Everything that could
+make a line MEAN something other than what it says — capture by a multi-line
+construct, quoting, escapes, comments, duplicate keys — fails closed. What
+remains is only: a gate line that genuinely says `APPROVED`, in a file whose
+unrelated line is corrupt. It cannot smuggle a value the artifact does not
+contain, which is what the gate exists to prevent.
 """
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -175,9 +217,9 @@ def _yaml_scalar(raw: str) -> str:
                 return ''
             if ch == quote:
                 # Closing quote: only whitespace and an optional comment may
-                # follow. Anything else means this isn't the scalar we think.
-                rest = raw[i + 1:].strip()
-                if rest and not rest.startswith('#'):
+                # follow, and YAML needs whitespace before that comment.
+                # Anything else means this isn't the scalar we think.
+                if not _rest_is_clean(raw[i + 1:]):
                     return ''
                 return ''.join(chars)
             chars.append(ch)
@@ -192,12 +234,138 @@ def _yaml_scalar(raw: str) -> str:
     return raw
 
 
+def _quote_scan(value: str):
+    """(closed, raw_text_after_closing_quote) for a quoted scalar.
+
+    The remainder is returned UNSTRIPPED: whether whitespace separated the
+    closing quote from what follows is load-bearing (see _rest_is_clean).
+    """
+    quote = value[0]
+    i = 1
+    while i < len(value):
+        if quote == "'" and value[i] == "'" and value[i + 1:i + 2] == "'":
+            i += 2          # '' escape
+            continue
+        if quote == '"' and value[i] == '\\':
+            i += 2          # \x escape
+            continue
+        if value[i] == quote:
+            return True, value[i + 1:]
+        i += 1
+    return False, ''
+
+
+def _rest_is_clean(rest: str) -> bool:
+    """May this text follow a closing quote — i.e. nothing, or a real comment?
+
+    YAML requires whitespace before a trailing `#`, so `'APPROVED'#x` is not a
+    value plus a comment: it's a syntax error, and PyYAML rejects the document
+    rather than reading `APPROVED` out of it. Accepting the `#` as a comment
+    would open a gate on a file YAML refuses to parse.
+    """
+    if rest == '':
+        return True
+    if rest[:1] not in (' ', '\t'):
+        return False
+    tail = rest.strip()
+    return tail == '' or tail.startswith('#')
+
+
+# A gate artifact's top-level line is `key: scalar`. Anything outside that
+# subset is refused rather than interpreted — see supported_line().
+_KEY_RE = re.compile(r'^[A-Za-z0-9_.\-]+$')
+_BLOCK_HEADER_RE = re.compile(r'^[|>][+-]?\d*\s*(#.*)?$')
+# Indicators that start something other than a plain scalar: flow collections,
+# properties/aliases, complex keys, directives, and YAML's reserved characters.
+_NOT_PLAIN = set('!&*[]{}?%@`,>|')
+
+
+def supported_line(line: str) -> bool:
+    """Is this column-0 line inside the narrow `key: scalar` subset we support?
+
+    An ALLOWLIST, deliberately. Enumerating dangerous constructs is endless —
+    each new YAML feature is another hole. Enumerating the *supported* ones is
+    closed: anything unrecognized fails closed, including syntax that makes the
+    document invalid outright (`broken: 'x' junk`, `broken: foo: bar`), because
+    a gate must not read a value out of a file YAML itself rejects.
+    """
+    if ':' not in line:
+        return False                       # not a mapping entry at all
+    key, value = line.split(':', 1)
+    if not _KEY_RE.match(key):
+        return False                       # exotic key, or a `%TAG ...` directive
+    if value and value[:1] not in (' ', '\t'):
+        return False                       # `key:value` — YAML needs the space
+
+    v = value.strip()
+    if not v or v.startswith('#'):
+        return True                        # empty value, or value-less + comment
+    if _BLOCK_HEADER_RE.match(v):
+        return True                        # `|`, `>-`: content is indented, safe
+
+    if v[0] in ('"', "'"):
+        closed, rest = _quote_scan(v)
+        if not closed:
+            return False                   # captures the lines below
+        if v[0] == '"' and '\\' in v:
+            return False                   # escapes we deliberately don't decode
+        return _rest_is_clean(rest)        # no trailing tokens, no `'x'#unspaced`
+
+    if v[0] in _NOT_PLAIN:
+        return False
+    plain = v.split(' #', 1)[0].rstrip()   # drop a trailing comment
+    if ': ' in plain or plain.endswith(':'):
+        return False                       # `foo: bar` as a value — invalid here
+    return True
+
+
+def frontmatter_is_flat(frontmatter: str) -> bool:
+    """Is this frontmatter a flat mapping of scalars — i.e. safe to read line by line?
+
+    Reading a gate field line-by-line is only sound when no line can be captured
+    by a construct opened on an earlier one. An unterminated flow collection or
+    quote swallows the lines beneath it, so
+
+        broken: [
+        status: APPROVED
+
+    has NO top-level `status` — the line belongs to `broken` — yet a line-wise
+    reader sees `status: APPROVED` and opens the gate. Rather than re-implement
+    YAML to find out, refuse the whole block: a gate that cannot trust its own
+    evidence must not pass on it.
+
+    Enforced by supported_line(), which is an ALLOWLIST — that is what makes
+    this closed rather than whack-a-mole. Rejecting known-dangerous constructs
+    invites an endless series of "one more syntax": a flow collection captures
+    the lines below it, a tag hides the quote that captures them, and so on.
+    Accepting only `key: scalar` inverts the burden — unrecognized syntax fails
+    closed by default, including syntax that makes the document invalid outright,
+    which YAML would refuse to read at all.
+
+    Block scalars (`|`, `>`) are allowed and are not a hole: their content must
+    be INDENTED, so they can never capture a column-0 line (verified against
+    PyYAML). Plain scalars can continue, but only onto INDENTED lines, which
+    frontmatter_value() fails closed on.
+    """
+    for line in frontmatter.splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        if line[:1] in (' ', '\t'):
+            continue            # indented: belongs to a parent key, not our level
+        if not supported_line(line):
+            return False
+    return True
+
+
 def frontmatter_value(frontmatter: str, key: str) -> str:
     """Return the top-level scalar for `key`, or '' when absent or ambiguous.
 
     Fails closed: an absent, nested, duplicated, or non-scalar key all yield ''
     so the caller blocks. A gate that cannot read its own evidence must not pass.
     """
+    if not frontmatter_is_flat(frontmatter):
+        return ''
+
     lines = frontmatter.splitlines()
     matches = []
     for i, line in enumerate(lines):
@@ -208,6 +376,15 @@ def frontmatter_value(frontmatter: str, key: str) -> str:
         if line.lstrip().startswith('#'):
             continue
         if not line.startswith(f'{key}:'):
+            continue
+
+        # A block mapping needs whitespace (or EOL) after the colon: `status:X`
+        # is NOT a key/value pair, it's the plain scalar "status:X", so the
+        # document has no `status` key at all. Matching it anyway would read
+        # `APPROVED` out of `status:APPROVED` and open a gate on a document
+        # that never recorded a status.
+        after = line[len(key) + 1:]
+        if after and after[:1] not in (' ', '\t'):
             continue
 
         # A YAML plain scalar continues onto indented following lines, so
@@ -328,6 +505,20 @@ def main():
             f"This phase cannot proceed without the gate artifact from the "
             f"previous phase. The artifact proves the gate actually ran — "
             f"instructional text alone is not enforcement.\n\n"
+            f"**Remedy:** {gate_remedy}"
+        )
+
+    if (required_status or required_fields) and not frontmatter_is_flat(read_frontmatter(artifact_path)):
+        deny(
+            tool_name, file_path,
+            f"GATE BLOCKED: {gate_description} — artifact is not readable.\n\n"
+            f"`{artifact_path}` does not parse as a flat YAML mapping of simple "
+            f"values: a line opens a flow collection (`[`, `{{`) or leaves a quote "
+            f"unterminated, which captures the lines beneath it. The gate cannot "
+            f"tell what this file actually records, and evidence it cannot read "
+            f"is not evidence.\n\n"
+            f"Fix the frontmatter so every top-level line is a plain `key: value` "
+            f"pair, then re-run the phase.\n\n"
             f"**Remedy:** {gate_remedy}"
         )
 
