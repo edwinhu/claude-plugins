@@ -206,22 +206,67 @@ _MATH_RPR = ('<w:rPr><w:rFonts w:ascii="Latin Modern Math" w:hAnsi="Latin Modern
              'w:cs="Latin Modern Math"/></w:rPr>')
 
 
-def set_math_font(docx: Path) -> None:
-    """Stamp Latin Modern Math onto every OMML run.
+# Word takes the math typeface from settings.xml, NOT from run properties, so
+# the run stamping below is not sufficient on its own. Pandoc regenerates
+# settings.xml from scratch and does not carry the reference doc's copy, so the
+# template's m:mathPr is lost in every build and must be re-injected here.
+_MATH_PR = (
+    '<m:mathPr>'
+    '<m:mathFont m:val="Latin Modern Math"/>'
+    '<m:brkBin m:val="before"/>'
+    '<m:brkBinSub m:val="--"/>'
+    '<m:smallFrac m:val="0"/>'
+    '<m:dispDef/>'
+    '<m:lMargin m:val="0"/>'
+    '<m:rMargin m:val="0"/>'
+    '<m:wrapRight/>'
+    '<m:intLim m:val="subSup"/>'
+    '<m:naryLim m:val="undOvr"/>'
+    '</m:mathPr>'
+)
 
-    ``settings.xml``'s ``m:mathFont`` is enough for Word, but LibreOffice and
-    x2t ignore it and render OMML in their own default serif — so a document
-    that looks right in Word comes out of the headless PDF path with Liberation
-    Serif math sitting next to Latin Modern body text. An explicit run font on
-    each ``m:r`` is honored by all three.
+
+def set_math_font(docx: Path) -> None:
+    """Point both math font mechanisms at Latin Modern Math.
+
+    Two separate stamps are needed, for two different consumers:
+
+    * ``settings.xml``'s ``m:mathPr/m:mathFont`` — this is what **Word** uses,
+      and run properties do not override it. The template carries it, but
+      pandoc regenerates ``settings.xml`` and drops it, so every build must
+      re-inject it or Word renders the math in Cambria Math while the body text
+      is correctly Latin Modern.
+    * an explicit ``w:rFonts`` on every ``m:r`` — LibreOffice and x2t ignore
+      ``m:mathFont`` entirely and would otherwise use their own default serif.
+
+    Neither alone is enough; a document can look right in one renderer and
+    wrong in the other. (LibreOffice ignores the run font too — see the
+    skill's "Known limitation" — but the stamp is still correct to emit.)
     """
     def fn(parts: dict) -> bool:
+        changed = False
+
         doc = parts["word/document.xml"].decode("utf-8")
         new, n = _MATH_RUN_RE.subn("<m:r>" + _MATH_RPR, doc)
-        if not n:
-            return False
-        parts["word/document.xml"] = new.encode("utf-8")
-        return True
+        if n:
+            parts["word/document.xml"] = new.encode("utf-8")
+            changed = True
+
+        key = "word/settings.xml"
+        if key in parts:
+            s = parts[key].decode("utf-8")
+            if "m:mathFont" not in s:
+                # m:mathPr sits late in the w:settings child order; both of
+                # these anchors precede it. The m: namespace is already
+                # declared on w:settings by pandoc's writer.
+                for anchor in ("<w:decimalSymbol", "<w:listSeparator", "</w:settings>"):
+                    if anchor in s:
+                        s = s.replace(anchor, _MATH_PR + anchor, 1)
+                        parts[key] = s.encode("utf-8")
+                        changed = True
+                        break
+
+        return changed
 
     _rewrite(docx, fn)
 

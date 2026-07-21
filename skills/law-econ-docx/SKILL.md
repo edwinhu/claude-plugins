@@ -147,15 +147,22 @@ uv run python3 ${CLAUDE_SKILL_DIR}/scripts/build_le_docx.py \
 
 ## Known limitation: math in the headless PDF path
 
-The build stamps `Latin Modern Math` both in `settings.xml` (`m:mathFont`) and on
-every OMML run. **Word honors it; LibreOffice does not** — it converts OMML to
-its own formula objects and uses its configured math font, so a Linux headless
-render shows Latin Modern body text next to Liberation Serif math. x2t is worse
-here (it misses Latin Modern entirely and falls back to Liberation Sans).
+The build stamps `Latin Modern Math` in **both** places it has to go —
+`settings.xml`'s `m:mathPr/m:mathFont` (what Word uses; run properties do *not*
+override it) and an explicit `w:rFonts` on every OMML run (for LibreOffice/x2t,
+which ignore `m:mathFont`). Both are required: pandoc regenerates
+`settings.xml` and drops the template's copy, so without the re-injection Word
+renders math in Cambria Math even though the body text is correct.
 
-The .docx is correct; only the LibreOffice *preview* is off. Render the
-submission PDF with `--renderer word`. Verified on the sample: body text is
-`LMRoman10-Regular/Bold/Italic`, math is the only fallback.
+**LibreOffice ignores the run font too** — it converts OMML to its own formula
+objects and uses its configured math font, so a LibreOffice render shows Latin
+Modern body text next to Liberation Serif math. x2t is worse (it misses Latin
+Modern entirely and falls back to Liberation Sans).
+
+The .docx is correct; only the LibreOffice *preview* is off. On Linux, render
+with **`word-render`** (below) — verified fully correct. Verified on the sample
+via LibreOffice: body text is `LMRoman10-Regular/Bold/Italic`, math is the only
+fallback.
 
 **Do not try to fix this by installing fonts or configuring LibreOffice — both
 have been tested and neither works.**
@@ -190,18 +197,34 @@ Spacing is likewise verified from the XML, not by eye: every relevant style
 
 ### Getting a correct-math PDF from a Linux box
 
-You do **not** need a Word VM. Options, in order of practicality:
+Use **`word-render`** — the QEMU Windows guest driven over SSH (nix module
+`programs.wordRender`, see `~/nix/modules/shared/word-render/README.md`). It is
+the only path on Linux that gets body text *and* math right:
 
-1. **Ship the .docx.** JLE/JLS/JLEO take Word submissions. The math is correct in
-   the file; the editor's Word renders it in Latin Modern. The bad preview never
-   reaches anyone.
-2. **Render on a Mac that has Word** — but **not over SSH**: macOS TCC blocks it
-   and cmux dispatch can't rescue a remote invocation. Run it from the Mac's GUI
-   login session, or grant Full Disk Access to sshd. See the **docx-render**
-   skill, "Driving the Mac's Word from another machine over SSH."
-3. **LaTeX preview for reading only.** `tectonic` (or xelatex) via pandoc gives
-   typographically faithful Latin Modern math on Linux. Use it to *read* the
-   paper; it is **not** the submission artifact and diverges from the .docx.
+```bash
+word-render OUT.docx OUT.pdf
+```
+
+Verified on the sample: `LMRoman10-{Regular,Bold,Italic}` +
+`LatinModernMath-Regular`, no Cambria/Calibri.
+
+**A fresh guest renders Cambria/Calibri and needs a one-time font install** —
+`word-render-install-fonts`. Stock `lmodern` does *not* work: Word will not
+render CFF-flavoured OpenType, and it matches families on name ID 1, where
+Latin Modern stores the optical size (`LM Roman 10`) rather than the
+typographic family. Nix builds a converted/renamed set; the README has the full
+diagnosis.
+
+Other options:
+
+- **Ship the .docx.** JLE/JLS/JLEO take Word submissions and the file is
+  correct, so the editor's Word renders it properly regardless of your preview.
+- **A Mac with Word** — but **not over SSH**: macOS TCC blocks it and cmux
+  dispatch can't rescue a remote invocation. See the **docx-render** skill,
+  "Driving the Mac's Word from another machine over SSH." Prefer `word-render`.
+- **LaTeX preview for reading only.** `tectonic` via pandoc gives faithful Latin
+  Modern on Linux, but it is **not** the submission artifact and diverges from
+  the .docx.
 
 ## Verification gate — before you claim the build is done
 
