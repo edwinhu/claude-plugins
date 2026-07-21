@@ -195,13 +195,10 @@ You do **not** need a Word VM. Options, in order of practicality:
 1. **Ship the .docx.** JLE/JLS/JLEO take Word submissions. The math is correct in
    the file; the editor's Word renders it in Latin Modern. The bad preview never
    reaches anyone.
-2. **Render on a Mac that has Word** — but note macOS **TCC blocks this over
-   SSH**. A plain `ssh mac 'doc_render.py … --renderer word'` fails with
-   `Operation not permitted: ~/Library/Containers/com.microsoft.Word/Data/wordrender/…`,
-   and `launchctl asuser` can't rescue it (needs root). Either run the render
-   from a terminal **inside the Mac's GUI login session**, or grant Full Disk
-   Access to `/usr/libexec/sshd-keygen-wrapper` in System Settings → Privacy &
-   Security so headless SSH renders work.
+2. **Render on a Mac that has Word** — but **not over SSH**: macOS TCC blocks it
+   and cmux dispatch can't rescue a remote invocation. Run it from the Mac's GUI
+   login session, or grant Full Disk Access to sshd. See the **docx-render**
+   skill, "Driving the Mac's Word from another machine over SSH."
 3. **LaTeX preview for reading only.** `tectonic` (or xelatex) via pandoc gives
    typographically faithful Latin Modern math on Linux. Use it to *read* the
    paper; it is **not** the submission artifact and diverges from the .docx.
