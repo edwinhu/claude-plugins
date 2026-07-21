@@ -74,6 +74,37 @@ x2t/LibreOffice if that's unavailable. Prereqs + full root-cause:
 `docs/investigations/2026-06-22_word-render-cmux-dispatch.md`. Disable with
 `$DOC_RENDER_NO_CMUX=1`.
 
+### Driving the Mac's Word from another machine over SSH — doesn't work
+
+The cmux rescue above assumes you are **on** the Mac. Invoking `--renderer word`
+over SSH from another host (e.g. a Linux box rendering on `mbp`) fails
+differently and has **no fallback** — cmux dispatch fails too, because there is
+no console session on the far end to dispatch into:
+
+```
+doc_render: word renderer failed: Word direct render failed
+  ([Errno 1] Operation not permitted:
+   ~/Library/Containers/com.microsoft.Word/Data/wordrender/<uuid>);
+  cmux dispatch also failed (…same…)
+```
+
+Note this is a **filesystem** permission error on Word's app container, not the
+AppleEvents `-600` of the local case — an SSH session is outside the TCC grant
+entirely. `launchctl asuser $(id -u) …` does **not** rescue it (`Could not
+switch to audit session: Operation not permitted` — needs root).
+
+Fixes, in order of preference:
+
+1. **Use `word-remote`** (next section) — a Windows guest is the supported
+   remote path; driving the Mac's Word from off-box is not.
+2. Run the render from a terminal **inside the Mac's GUI login session** (then
+   the normal local path, incl. cmux dispatch, applies).
+3. Grant Full Disk Access to `/usr/libexec/sshd-keygen-wrapper` in System
+   Settings → Privacy & Security, after which headless SSH renders work.
+
+**Do not** paper over this by falling back silently — an explicit
+`--renderer word` deliberately raises rather than downgrading.
+
 ## Word in a Windows guest (`word-remote`) — the Linux path
 
 `--renderer word` is macOS-only. `word-remote` runs the same Word engine in a
