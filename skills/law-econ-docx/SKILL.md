@@ -157,6 +157,55 @@ The .docx is correct; only the LibreOffice *preview* is off. Render the
 submission PDF with `--renderer word`. Verified on the sample: body text is
 `LMRoman10-Regular/Bold/Italic`, math is the only fallback.
 
+**Do not try to fix this by installing fonts or configuring LibreOffice — both
+have been tested and neither works.**
+
+| Attempted fix | Result |
+|---|---|
+| Install Latin Modern Math system-wide | No effect. The font is typically **already installed** (TeX/LaTeX pulls it in) and `fc-match "Latin Modern Math"` resolves to the real `latinmodern-math.otf`. Availability was never the problem. |
+| Override LO's Math module default fonts (`/org.openoffice.Office.Math/Font` → `Variables`, `Functions`, `Numbers`, `Text`) | No effect. Re-rendered with those forced to `Latin Modern Math` in a clean LO profile; **byte-identical font list**. The OOXML import fixes formula fonts at import time and consults neither `m:mathFont` nor the Math defaults. |
+
+To confirm the fallback is math-only rather than a document-wide problem, map
+glyphs to fonts instead of trusting `pdffonts` (which ignores `-f`/`-l` and
+reports the whole document for every page) or a vision check (which misjudges
+double spacing):
+
+```bash
+uv run --with pdfplumber python3 -c "
+import pdfplumber, collections
+for i, pg in enumerate(pdfplumber.open('OUT.pdf').pages, 1):
+    d = collections.defaultdict(str)
+    for ch in pg.chars: d[ch['fontname'].split('+')[-1]] += ch['text']
+    print(i, {f: (len(t) if 'LMRoman' in f else t[:60]) for f, t in d.items()})"
+```
+
+Expected: `LiberationSerif` carries **only** math glyphs (`π ρ ∂ > = +` etc.) and
+appears **only** on pages with equations. `OpenSymbol` on page 1 is the `*`
+acknowledgment marker, not a fallback. If Liberation shows up on a page with no
+math, something else is wrong — that is a real bug, not this limitation.
+
+Spacing is likewise verified from the XML, not by eye: every relevant style
+(`BodyText`, `FirstParagraph`, `FootnoteText`, `Bibliography`, `Abstract`,
+`TableNote`) must carry `w:line="480"` (double); `240` would be single.
+
+### Getting a correct-math PDF from a Linux box
+
+You do **not** need a Word VM. Options, in order of practicality:
+
+1. **Ship the .docx.** JLE/JLS/JLEO take Word submissions. The math is correct in
+   the file; the editor's Word renders it in Latin Modern. The bad preview never
+   reaches anyone.
+2. **Render on a Mac that has Word** — but note macOS **TCC blocks this over
+   SSH**. A plain `ssh mac 'doc_render.py … --renderer word'` fails with
+   `Operation not permitted: ~/Library/Containers/com.microsoft.Word/Data/wordrender/…`,
+   and `launchctl asuser` can't rescue it (needs root). Either run the render
+   from a terminal **inside the Mac's GUI login session**, or grant Full Disk
+   Access to `/usr/libexec/sshd-keygen-wrapper` in System Settings → Privacy &
+   Security so headless SSH renders work.
+3. **LaTeX preview for reading only.** `tectonic` (or xelatex) via pandoc gives
+   typographically faithful Latin Modern math on Linux. Use it to *read* the
+   paper; it is **not** the submission artifact and diverges from the .docx.
+
 ## Verification gate — before you claim the build is done
 
 IDENTIFY the output → RUN the render → READ the pages → VERIFY → CLAIM.
