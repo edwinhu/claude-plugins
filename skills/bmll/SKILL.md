@@ -86,6 +86,24 @@ rule above.
   today-inclusive range returns a short series, not an error.
 - **`time_series` analytics need an entitlement separate from market data.** A missing subscription
   returns empty results, not a permission error.
+- **Venue schemas change at feed migrations, and every field carries an Available-From date.** The
+  LSE splits into Pre-GTP and GTP generations with different field sets (11 trade fields vs 56) and
+  different normalisation mappings. A multi-year study that does not check the venue page reports a
+  feed migration as a regime change — a confident finding about the market that is an artefact of
+  the plumbing.
+- **Retail flags start mid-history and some mechanisms are excluded entirely.** Xetra's retail flag
+  exists only from 2024-05-20, CBOE EU's from 2025-09-08; Turquoise Retail Max and the German
+  single-market-maker venues are not in the `RetailTrades` metric at all; US SIP retail is inferred
+  from odd-lot + inside-NBBO + sub-penny pricing and misses internalised PFOF. Retail "growth"
+  starting exactly on a flag's go-live date is the instrument, not the market.
+- **Three MMT versions coexist (v3.04, v4.1, v5.0) and the level semantics differ between them** —
+  v4.1 splits several v3.04 levels into pairs, v5.0 adds 3.14 and renames 3.3. Decoding a long
+  history with one version's table silently mislabels the other periods.
+- **`event_no` repeats across rows; only `end_of_event == True` marks a book state that could
+  actually be traded against.** Analysing every row treats intermediate states as real ones.
+- **`market_state` auction values span order entry *and* uncrossing.** Filtering
+  `CLOSING_AUCTION` returns the whole call phase; isolate the uncross with
+  `bmll_trade_type == UNCROSSING`.
 
 ### Red Flags — STOP If You Catch Yourself:
 
@@ -158,6 +176,9 @@ Both import in the Data Lab; they are **not** interchangeable.
 | Daily analytics (spread, volume, auction dislocation) | `bmll.time_series.query(...)` | [analytics-timeseries.md](references/analytics-timeseries.md) |
 | Daily lit/dark/SI/OTC split | `bmll.time_series.classified_trades(...)` | [analytics-timeseries.md](references/analytics-timeseries.md) |
 | Cross-venue consolidated book | `bmll.market_data.instrument_cbbo(...)` | [order-book-rebuilding.md](references/order-book-rebuilding.md) |
+| Impact around non-trade events, sub-ms horizons, or cross-product | `scripts/bmll_impact.py` over an L3 book | [market-impact.md](references/market-impact.md) |
+| Retail flow | `BMLLParticipantType` (Trades Plus), `RetailTrades` metric, or `all_trades(columns=[...,'retail'])` | [retail.md](references/retail.md) |
+| What a venue publishes / how it is normalised | Venue dataset page | [venues.md](references/venues.md) |
 | Market cap / free float / FX / calendar | `bmll2.corporate_actions`, `get_fx`, `Calendar` | [other-datasets.md](references/other-datasets.md) |
 
 Asset-class support differs by method:
@@ -194,9 +215,12 @@ and the error is invisible in the output.
 | Script | Purpose |
 |---|---|
 | `scripts/bmll_markouts.py` | Pre/post-trade markouts from a Trades Plus frame: side inference (Lee-Ready), bps conversion, aggressor-normalised sign, notional-weighted aggregation by any grouping |
+| `scripts/bmll_impact.py` | Event-time market impact from an L3 book: arbitrary events, arbitrary horizons, cross-product (events in one book vs another book's midpoint) |
 | `scripts/bmll_checks.py` | Validation helpers: per-date non-emptiness, `Printable`/currency sanity, `PricePoint` sentinel filtering, `IsBlock` normalisation |
 
 Run with `python scripts/bmll_markouts.py --help` inside the Data Lab, or import the functions.
+`scripts/test_bmll_scripts.py` and `scripts/test_bmll_impact.py` cover them against synthetic
+frames built to the documented schema — they do not exercise the live API.
 
 ## Reference Files
 
@@ -205,11 +229,16 @@ Load the file that matches the task — do not read them all.
 | File | Covers |
 |---|---|
 | [references/trades-plus.md](references/trades-plus.md) | **Trades Plus**: full ~99-field schema, markouts, `PricePoint` spread capture, block analysis, participant type, intraday classification |
+| [references/schemas.md](references/schemas.md) | Raw vs harmonised vs normalised layers, LOB event model, the normalised value vocabularies (market state, trade type, LOB actions), normalisation process (icebergs, auctions, regional trade conditions, LIS), MMT |
+| [references/venues.md](references/venues.md) | Per-venue datasets: MIC index for all 88 venues, feed generations and Available-From dates, member attribution |
 | [references/reference-data.md](references/reference-data.md) | `reference.query`, markets/instruments/listings, indices and constituents, futures, OPRA options |
 | [references/market-data.md](references/market-data.md) | `get_market_data` / `_range`, tables, dataframe engines, Spark SQL, futures and options access |
 | [references/security-api.md](references/security-api.md) | `Security` vs `NormalisedSecurity`, `MarketData` tables, normalised enums, market states |
 | [references/order-book-rebuilding.md](references/order-book-rebuilding.md) | `l2_snapshot`, `rebuilt_book_*`, snapshot generators, `rebuilder` operations, custom metrics, order tracing, consolidated books |
+| [references/market-impact.md](references/market-impact.md) | Event-time impact from the L3 book, sign convention, window choice, cross-product (futures → ETF) impact |
+| [references/retail.md](references/retail.md) | Retail mechanisms and per-venue indicators, the three access routes, coverage caveats that bound the metric |
 | [references/analytics-timeseries.md](references/analytics-timeseries.md) | `bmll.time_series` metrics and tags, Mongo-style metric queries, classified-trades taxonomy, CBBO |
 | [references/compute-and-storage.md](references/compute-and-storage.md) | File management API, storage areas, Spark dataframes, `SparkHelper`, clusters, scheduled jobs |
 | [references/other-datasets.md](references/other-datasets.md) | FX, shares outstanding / free float / market cap, trading calendar, ETF reference data |
+| [references/advanced-tutorials.md](references/advanced-tutorials.md) | Index of BMLL's advanced notebooks; thread safety and `Session`, code sharing, external data, R, simulation |
 | [references/troubleshooting.md](references/troubleshooting.md) | Empty results, memory errors, Spark result-size limits, permissions, timestamp types |
