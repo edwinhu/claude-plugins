@@ -66,7 +66,36 @@ unauditable mess at vote grain.
 
 ## Measured Coverage
 
-2005–2025 panel, as built. `via_seriesid` alone supplies 19,327 of 21,191 links —
+Two ladders are documented here: the **portable** one shipped in
+`examples/voting_ownership_pipeline/npx_linking/`, which runs from WRDS
+credentials alone, and the **hand-adjudicated** one it is derived from.
+
+### Portable ladder — measured 2026-07-25, 2005–2025
+
+| Tier | Kind | fundids | vote rows | % |
+|---|---|---:|---:|---:|
+| `propagated` | exact | 5,957 | 84,831,520 | 58.76 |
+| `sec_name` | fuzzy→ID | 8,033 | 26,637,210 | 18.45 |
+| `crsp_name_scoped` | fuzzy | 763 | 1,953,098 | 1.35 |
+| `iss_seriesid` | exact | 1,814 | 1,771,876 | 1.23 |
+| `crsp_name_global` | fuzzy | 452 | 1,000,385 | 0.69 |
+| `via_sec_ticker` | exact | 228 | 499,672 | 0.35 |
+| `unlinked` | — | 9,682 | 27,682,099 | 19.17 |
+
+**80.8% of vote rows linked** (82.4% of linkable rows — 1,038 ISS
+non-registrants have no SEC seriesId by construction). Blocks: `active` 21,627 ·
+`index` 3,704 · `passive` 560 · `asset_owner` 1,038. TNA at fundid grain after
+the many-to-one split: **$32.96T**.
+
+Note `sec_name` — matching the ISS name against SEC SERIES names to recover an
+*identifier*, which then resolves exactly through `crsp_cik_map`. It is worth
+18.45 points on its own, because ISS only reports `seriesid` from 2023 and most
+of the panel by fundid count stopped voting before then. **A name match used to
+obtain an ID is far safer than a name match used to obtain a link.**
+
+### Hand-adjudicated ladder — the 90.5% version
+
+`via_seriesid` alone supplies 19,327 of 21,191 links —
 **the exact-ID tiers are the strategy; the fuzzy tiers are the tail.**
 
 | L3 tier | fundids | Kind |
@@ -88,7 +117,11 @@ unauditable mess at vote grain.
 | `asset_owner` | 1,035 |
 | `passive` | 614 |
 
-**~90.5% of vote rows are linked.** Note the asymmetry: 5,495 of 26,686 fundids
+**~90.5% of vote rows are linked.** The 9.7-point gap to the portable ladder is
+`feeder_master_name` (275), `via_l2_crsp_name` (210), `digit_split_name` (6) and
+a curated family table — tiers that are *adjudication decisions*, not algorithms,
+plus the fact that the SEC masters begin in 2010 and cannot reach funds that died
+before then (2,847 unlinked fundids last voted 2005–2009). Note the asymmetry: 5,495 of 26,686 fundids
 (20.6%) are unlinked but only ~9.5% of vote *rows*, because unlinked funds are
 disproportionately small and short-lived.
 
@@ -269,12 +302,21 @@ same problem is 16 fundids × millions of rows and is not auditable.
 |---|---|
 | `linking_config.py` | every threshold, regex and stoplist, with its rationale |
 | `matching.py` | the reusable engine: normalisers, digit guard, TF-IDF candidates, cross-family verdict |
-| `build_sec_series_master.py` | L1 — consolidate the SEC annual series/class masters |
+| `download_sec_series_class.py` | fetch the SEC annual masters (URLs are scraped — they are inconsistent across vintages, and the 2016 file carries no year in its name) |
+| `build_sec_series_master.py` | L1 — consolidate them |
+| `pull_npx_funds.py` | L0 — ISS fund dimension, aggregated server-side |
+| `pull_crsp_funds.py` | L0 — CRSP dimension (`fund_hdr` + `fund_summary2` + `crsp_cik_map`) |
+| `build_npx_crsp_link.py` | the ladder + first-class coverage report |
+| `smoke_test.sh` | one year, 8 assertions — run before the full ladder |
 
-The L2/L3 ladder drivers are project-specific (they depend on a particular
-project's CRSP extracts and adjudication files) and are **not** vendored here;
-`matching.py` provides every primitive they need, and the tier tables above
-specify the ladder they implement.
+**The ladder runs from a fresh checkout with WRDS credentials.** The only
+project-specific input is `--family-overlay`, a hand-curated institution →
+family-token CSV, and it is **optional**: absent, the ladder completes at
+slightly lower coverage and the report says so.
+
+`crsp.crsp_cik_map` is what makes this portable — it carries `series_cik` in
+`S000…` form for 59,244 of 68,382 fundnos, so the majority tier needs nothing
+project-specific.
 
 ## See Also
 
