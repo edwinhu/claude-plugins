@@ -53,4 +53,18 @@
     and meetingtype in (&MEETINGTYPES.)
 %mend;
 
+/* MEASURED EFFECT of these two filters on the item frame, 2005-2025 (2026-07-25):
+ *
+ *   filters            distinct items   raw rows   fanout
+ *   none                    848,506      848,736      230
+ *   as declared above       712,466      712,477       11
+ *
+ * Two things to note before reconciling anything:
+ *   - The item frame shrinks by 136,040 items. Any N-PX vote-row total quoted
+ *     against the UNFILTERED universe (144,375,860 for 2005-2025) will NOT match
+ *     a run made with these filters. Reconcile against a count taken under the
+ *     same config, or set MEETINGTYPES/VOTERESULTS to admit everything.
+ *   - fanout drops 230 -> 11 because excluding 'Pending' removes most of the
+ *     versioning pairs that make vavoteresults non-unique on itemonagendaid.
+ */
 %put NOTE: PIPELINE UNIVERSE &year1.-&year2. meetingtypes=&MEETINGTYPES. voteresults=&VOTERESULTS.;
