@@ -9,19 +9,22 @@
 # Not run_sas.sh: that builds the log filename from the sysparm, and this
 # sysparm contains spaces and a path.
 #
-#   qsub -v "Y1=2005,Y2=2025,LINKCSV=$PWD/npx_link.csv" run_npx_stage.sh
+#   qsub -v "LINKCSV=$PWD/npx_link.csv" run_npx_stage.sh
+#
+# The year range and the meeting-type / vote-result filters are NOT parameters:
+# they live in pipeline_config.sas, which stage_npx_link.sas %includes and which
+# build_meetings.sas reads too. Passing a window here is what let the two legs
+# silently disagree about the item universe.
 
 set -u
 mkdir -p logs
 
-Y1="${Y1:-2005}"
-Y2="${Y2:-2025}"
 LINKCSV="${LINKCSV:-$(pwd)/npx_link.csv}"
 
-echo "stage host=$(hostname) years=${Y1}-${Y2} csv=${LINKCSV} started=$(date -Is)"
+echo "stage host=$(hostname) csv=${LINKCSV} started=$(date -Is) (universe from pipeline_config.sas)"
 
 sas -nodms -noterminal -nosyntaxcheck \
-    -sysparm "${Y1} ${Y2} ${LINKCSV}" \
+    -sysparm "${LINKCSV}" \
     -log   logs/stage_npx_link.log \
     -print logs/stage_npx_link.lst \
     stage_npx_link.sas

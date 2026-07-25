@@ -23,6 +23,9 @@ set -e
 cd "$(dirname "$0")"
 mkdir -p logs
 
+# The year range here only sizes the SGE array (-t). The item UNIVERSE — window,
+# meeting types, vote results — comes from pipeline_config.sas, which both legs
+# read. Keep them consistent; merge_panel.sas fails the run if the legs disagree.
 Y1="${1:-2005}"
 Y2="${2:-2025}"
 LINKCSV="${LINKCSV:-$(pwd)/npx_link.csv}"
@@ -42,7 +45,7 @@ echo "=========================================="
 
 # --- Step 1: stage the two hash inputs (crosswalk + item universe) ---
 JOB_STAGE=$(qsub -terse -N npx_stage -o logs/stage_npx_link.sge.log -j y \
-    -v "Y1=${Y1},Y2=${Y2},LINKCSV=${LINKCSV}" \
+    -v "LINKCSV=${LINKCSV}" \
     run_npx_stage.sh | cut -d. -f1)
 echo "Step 1  stage_npx_link: job $JOB_STAGE (~30 sec)"
 

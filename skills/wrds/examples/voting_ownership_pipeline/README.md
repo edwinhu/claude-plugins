@@ -2,12 +2,79 @@
 
 All-SAS pipeline for building a meeting-level panel with proxy voting outcomes and ownership data. Runs on WRDS SGE grid with maximum parallelism.
 
-Two legs:
+## One command
 
-| Leg | Grain | Entry point |
+```
+Workflow({ name: 'npx-ownership-pipeline',
+           args: { wrdsProjectDir: '~/projects/pass', outLib: '/scratch/<school>/<user>/npx' } })
+```
+
+`workflows/npx-ownership-pipeline.js` coordinates all four data legs and emits
+the analysis-ready panel:
+
+| Output | Grain | What it is |
 |---|---|---|
-| **Item-level ownership panel** | meeting × permno | `run_pipeline.sh` |
-| **Fund-level N-PX votes** | `itemonagendaid` × block | `run_npx_pipeline.sh` |
+| **`out.pass_npx`** | **`(itemonagendaid, block)`** | **the deliverable** — item-level ownership panel JOINED to each item's per-block observed For/Against/Abstain split |
+| `out.pass` | `itemonagendaid` | the item-level ownership panel alone (unchanged) |
+
+The join happens **on the grid**, in `merge_panel.sas`. Nothing is left to be
+merged locally — shipping the joined result is the point.
+
+The four legs, and their real dependency structure:
+
+| # | Leg | Source | Depends on |
+|---|---|---|---|
+| 1 | S12 mutual-fund holdings | `split_s12.sas` → `tfn_holdings_parallel.sas` ×9 | — |
+| 2 | Institutional holdings | `build_inst_own.sas` (Thomson S34) **+** EDGAR 13F scrape (`skills/wrds/scripts/parse_13f/`) | — |
+| 3 | N-PX fund votes | `build_npx.sas` × 21 (SGE array) | **leg 4** |
+| 4 | ISS→CRSP crosswalk | `npx_linking/` → `stage_npx_link.sas` | — |
+
+Legs 1, 2 and 4 start together. **Leg 4 hard-gates leg 3**: the array hash-merges
+the crosswalk, and without it every task opens a missing dataset and exits 0
+having written nothing. A leg that fails verification stops its own branch
+without killing the others.
+
+Leg 2 has **two sources for one quantity**. Thomson S34 decayed after 2013 and
+undercounts; the EDGAR scrape exists for that reason. **EDGAR wins where present,
+S34 is fallback-only, and they are never blended** — the workflow asserts that no
+manager-quarter carries both.
+
+The workflow **coordinates and verifies; it does not execute SAS.** Every leg
+runs on the grid over ssh: the agents `qsub`, poll `qstat`, then read logs and
+datasets to assert concrete row counts. No leg is believed because its job exited
+0 — during development an array lost a task to a node eviction and still reported
+clean, producing 20 of 21 outputs with no error anywhere.
+
+The two shell orchestrators still work and are the fallback if you want to drive
+a single leg by hand: `run_pipeline.sh` (item level) and `run_npx_pipeline.sh`
+(fund level). They cannot see each other, which is why the workflow exists.
+
+## One universe, asserted
+
+`pipeline_config.sas` declares the date window, the meeting-type list and the
+vote-result list **once**. `build_meetings.sas` (ownership leg) and
+`stage_npx_link.sas` (N-PX leg) both `%include` it; neither may re-declare them.
+
+This is not tidiness. Before it, the two legs carried their own filters:
+
+```
+build_meetings.sas    2003-2024, voteresult in ('Pass','Fail'), 5 meetingtypes
+stage_npx_link.sas    2005-2025, no voteresult filter, no meetingtype filter
+```
+
+Nothing detected the disagreement, and this project has already widened its
+meeting-type filter once — which changes the item universe. Two things now make
+divergence impossible rather than merely detectable:
+
+1. **Workflow preflight** compares the declared universe against
+   `pipeline_config.sas` on the grid and **refuses to start any leg** if they
+   differ.
+2. **`merge_panel.sas` asserts** that every item in `out.meetings` exists in
+   `out.npx_items` and calls `abort abend` if not. It **fails**, it does not warn.
+
+(The reverse containment is expected: `build_meetings.sas` additionally drops
+records with an unusable `base`, turnout > 120, and `votedFor <= 0` with `'Pass'`,
+so `npx_items` is a superset. That difference is reported, not asserted.)
 
 The N-PX leg is documented in [its own section below](#fund-level-n-px-leg).
 
@@ -51,7 +118,8 @@ Total wall time: ~20 min
 | `build_mflinks.sas` | SAS | Build mfl2/mfl3 prereqs for TFN jobs |
 | `split_s12.sas` | SAS | Read S12 via PostgreSQL, write year-range partitions to /scratch |
 | `tfn_holdings_parallel.sas` | SAS | Partitioned S12 → MFLINKS → CUSIP→PERMNO → TSO → aggregate → out.mf_own_YYYY_YYYY |
-| `merge_panel.sas` | SAS | Concatenate MF chunks + MERGE_ASOF all inputs → out.pass |
+| `merge_panel.sas` | SAS | Concatenate MF chunks + MERGE_ASOF all inputs → `out.pass`; stack + re-aggregate N-PX cells, **assert one universe**, join → `out.pass_npx` |
+| `pipeline_config.sas` | SAS | **The universe** — date window, meeting types, vote results. Both legs `%include` it |
 
 ### Python alternatives (kept for reference)
 

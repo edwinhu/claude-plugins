@@ -5,10 +5,14 @@
  *          ~/projects/pass/recs_2005_2024.csv
  *
  * Output:  out.meetings (item-level vote results with permno, cik, fight flag)
+ *          grain = itemonagendaid (deduped nodupkey at the end)
+ *
+ * The date window and the item-universe filters come from pipeline_config.sas —
+ * do NOT re-declare them here. The N-PX leg reads the same file, and
+ * merge_panel.sas asserts the two legs agree about which items exist.
  */
 
-%let year1 = 2003;
-%let year2 = 2024;
+%include "pipeline_config.sas";
 
 /* --- Read PostgreSQL credentials from .pgpass --- */
 /* Why: risk.vavoteresults SAS libname on WRDS can lag the live PG table by months
@@ -104,12 +108,7 @@ proc sql;
                    votedwithheld, brokernonvote, base, outstandingshare,
                    voterequirement
             from risk.vavoteresults
-            where meetingdate >= %str(%')&year1.-01-01%str(%')
-              and meetingdate <= %str(%')&year2.-12-31%str(%')
-              and voteresult in ('Pass','Fail')
-              and meetingtype in (
-                'Annual','Special','Annual/Special',
-                'Proxy Contest','Proxy Contest (M&A)')
+            where %vaFilter(a=vavoteresults)
         );
     disconnect from postgres;
 quit;

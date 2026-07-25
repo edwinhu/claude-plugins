@@ -14,23 +14,25 @@
  * Run ONCE before the array. Every array task opens these read-only.
  */
 
-/* Parameters arrive via -sysparm as "year1 year2 csvpath" (run_npx_stage.sh).
- * NOT via `qsub -v`: that sets shell environment variables, which SAS macro
- * code cannot see without %sysget. And `%let x = %sysfunc(coalescec(&x., d))`
- * does not work as a defaulting idiom — when x is undefined it is a recursive
- * self-reference and SAS errors out rather than taking the default.
- */
-%global year1 year2 LINKCSV;
-%let year1   = %scan(&sysparm., 1, %str( ));
-%let year2   = %scan(&sysparm., 2, %str( ));
-%let LINKCSV = %scan(&sysparm., 3, %str( ));
+/* THE UNIVERSE COMES FROM pipeline_config.sas — the same file build_meetings.sas
+ * reads. It is not a parameter of this script, and must not become one again:
+ * a year range or meetingtype filter passed in here could disagree with the
+ * ownership leg's, and nothing downstream would notice. merge_panel.sas asserts
+ * the two legs agree. */
+%include "pipeline_config.sas";
+
+/* Only the crosswalk path is a per-run parameter. It arrives via -sysparm
+ * (run_npx_stage.sh), NOT `qsub -v`: that sets shell environment variables,
+ * which SAS macro code cannot see without %sysget. */
+%global LINKCSV;
+%let LINKCSV = %scan(&sysparm., 1, %str( ));
 
 /* Defaulting lives inside a macro: open-code %IF/%THEN is a 9.4M5+ feature with
  * restrictions on what may follow %THEN, and fails here with
- * "ERROR: Expected %DO not found". Inside a macro definition it is plain. */
+ * "ERROR: Expected %DO not found". Inside a macro definition it is plain.
+ * Note `%let x = %sysfunc(coalescec(&x., d))` is NOT a defaulting idiom — when
+ * x is undefined it is a recursive self-reference and errors. */
 %macro _npx_defaults;
-    %if %superq(year1) =   %then %let year1 = 2005;
-    %if %superq(year2) =   %then %let year2 = 2025;
     %if %superq(LINKCSV) = %then %let LINKCSV = ./npx_link.csv;
 %mend;
 %_npx_defaults
@@ -80,14 +82,14 @@ proc sql;
     create table out.npx_items as
     select distinct itemonagendaid
     from risk.vavoteresults
-    where meetingdate between "01jan&year1."d and "31dec&year2."d
+    where %vaFilterSAS
       and itemonagendaid is not missing;
 quit;
 
 proc sql noprint;
     select count(*) into :nitem trimmed from out.npx_items;
     select count(*) into :nraw  trimmed from risk.vavoteresults
-        where meetingdate between "01jan&year1."d and "31dec&year2."d;
+        where %vaFilterSAS;
 quit;
 /* fanout_rows is the count of duplicate itemonagendaid rows in vavoteresults —
  * the rows a PostgreSQL INNER JOIN would multiply the N-PX side by, and which
