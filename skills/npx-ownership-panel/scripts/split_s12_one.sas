@@ -6,10 +6,16 @@
  *
  * WHY THIS STILL GOES THROUGH POSTGRESQL
  * --------------------------------------
- * Every other source table in this pipeline is read natively from its SAS
- * libname, because each carries a SAS index that prunes a where= to one task's
- * slice. Whether tfn.s12 should join them is a MEASURED question — see
- * references/pipeline.md, "The S12 read path". Do not change it on reasoning.
+ * NOT because tfn.s12 lacks a SAS index — it has one (s12.sas7bndx, 19.6 GB,
+ * with rdate-leading composites), and nine CONCURRENT native reads measured
+ * 375s against 910s for this sequential PG path, with identical row counts.
+ * Native is measured faster.
+ *
+ * PG is retained only because the native path has not been IDENTITY-tested:
+ * PG numeric conversion and a native SAS read can land a weighted fraction one
+ * ULP apart, and a weighted for_frac is the value most likely to move. Reopen
+ * when a canonical hash shows native reproducing the frozen baseline.
+ * See references/pipeline.md, "The S12 read path", for the numbers.
  *
  * WHY -tc MATTERS: each task opens its own PostgreSQL connection, and the WRDS
  * per-role cap is 7 (`select rolconnlimit from pg_roles where rolname =

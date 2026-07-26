@@ -402,22 +402,34 @@ computed from nothing.
 
 # Engine choice per leg: native SAS vs PostgreSQL
 
-A leg reads natively when its SAS dataset carries an index, and via PostgreSQL
-when only the PG copy does. Checkable in seconds, and it settles every leg:
+**Every source table in this pipeline is indexed on both sides.** Check before
+choosing, and beware how easy it is to check wrongly:
 
 ```bash
-ls /wrds/<lib>/sasdata/<ds>/*.sas7bndx          # SAS side
+ls -la /wrds/<lib>/sasdata/<ds>/           # NO head — see the warning below
 ```
 ```sql
-SELECT indexname FROM pg_indexes WHERE tablename = '<table>';   -- PG side
+SELECT indexname FROM pg_indexes WHERE tablename = '<table>';
 ```
 
-| Table | SAS index | Engine | Basis |
-|---|---|---|---|
-| `risk.voteanalysis_npx` | 329 GB + **15 GB** `.sas7bndx` | native | proven: 21 tasks, 839s |
-| `risk.vavoteresults` | 836 MB + **52 MB** | native | SAS copy verified `==` PG |
-| `tfn.s34` | 21.6 GB + **8.0 GB** | native | indexed on `rdate` |
-| `tfn.s12` | 47.4 GB + **19.6 GB** | **see below — measured** | |
+> **Do not pipe the listing through `head`.** Both of the checks that concluded
+> "`tfn.s12` has no SAS index" were truncated: `ls … | head -6` cut at exactly
+> six lines and the index was line seven; `find … -name '*.sas7bndx' | head -12`
+> filled all twelve lines with hits from another directory, so `s12/` never
+> printed. Absence of output from a truncated command is not evidence of
+> absence. The listing even showed `total 109843524` — 104 GB against a 44 GB
+> data file — and the unexplained 60 GB *was* the index.
+
+| Table | SAS data | SAS index | Engine shipped |
+|---|---:|---:|---|
+| `risk.voteanalysis_npx` | 329 GB | **15 GB** | native — proven, 21 tasks, 839s |
+| `risk.vavoteresults` | 836 MB | **52 MB** | native — SAS copy verified `==` PG |
+| `tfn.s34` | 21.6 GB | **8.0 GB** | native |
+| `tfn.s12` | 47.4 GB | **19.6 GB** | PostgreSQL — **see below** |
+
+Index presence alone does not decide the engine. `tfn.s12` is indexed and its
+native read measures *faster*, and it still ships on PostgreSQL — for a reason
+that is about identity, not speed.
 
 ## The S12 read path — measured, not inferred
 
@@ -458,12 +470,24 @@ and the likely reason is the same one the N-PX leg documents: a `where=` that
 defeats the index full-scans, while an index-friendly `BETWEEN` on date literals
 does not. 375s for nine concurrent readers of a 47.4 GB file is not contention.
 
-**What is still shipped, and why.** The pipeline keeps the PostgreSQL read. The
-native path is measured faster but has **not been identity-tested end to end** —
-row counts matching is necessary, not sufficient, and PG numeric conversion vs a
-native SAS read is exactly the float path most likely to move a weighted
-fraction. Converting it is a live option with a measured 535s upside; it needs a
-canonical-hash comparison against the frozen baseline before it ships.
+**What is still shipped, and why.** The pipeline keeps the PostgreSQL read.
+
+Both stories about *why* were wrong. The README's original rationale — NFS
+contention — does not reproduce. The later correction — that `tfn.s12` lacks a
+SAS index and therefore needs PG — is false; the index is 19.6 GB and is listed
+above. Neither claim survives measurement.
+
+What is true is narrower: the native path is **2.4x faster and measured**
+(375s vs 910s, identical row counts on all nine partitions), and it has **not
+been identity-tested**. Row counts matching is necessary, not sufficient. PG
+numeric conversion and a native SAS datastep read can land a weighted fraction
+one ULP apart, and a weighted `for_frac` is exactly the value most likely to
+move. So PG is retained on an evidence-based hold with an explicit reopen
+condition:
+
+> **Reopen when:** `canonical_dump.sas` + `canonical_hash.py` show the native
+> path reproducing the frozen `out.pass_npx` hash at 12 significant digits.
+> Upside is 535s plus eliminating ~41 GB of scratch staging.
 
 **The uncontested S12 win, now implemented.** The nine PG extracts were nine
 independent, disjoint, indexed queries executed *sequentially in one job*.

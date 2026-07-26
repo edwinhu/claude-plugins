@@ -15,6 +15,7 @@ mechanical once you have this crosswalk; **the crosswalk is the work**.
 - [Measured Coverage](#measured-coverage)
 - [The Matcher](#the-matcher)
 - [Precision Rules That Each Fixed a Real Failure](#precision-rules-that-each-fixed-a-real-failure)
+- [Determinism: the join-order → corpus-order trap](#determinism-the-join-order--corpus-order-trap)
 - [Aggregation Traps](#aggregation-traps)
 - [Identity Resolution Belongs at Fund Grain](#identity-resolution-belongs-at-fund-grain)
 - [Code](#code)
@@ -252,6 +253,103 @@ A CRSP fund whose last summary predates the ISS fund's first vote cannot be the
 same fund. This is a second signal independent of the name score, and it bites
 exactly where the name tiers do their work (dead early-panel funds). One year of
 slack absorbs the `caldt`-vs-`meetingdate` offset.
+
+## Determinism: the join-order → corpus-order trap
+
+**This ladder was not reproducible, and the cause is not where anyone looks
+first.** Two cold runs of identical code on identical inputs produced different
+crosswalks:
+
+```
+crsp_fundno.nulls   9,542 vs 9,563     ← 21 funds linked in one run, not the other
+match_tier          93 rows differ
+crsp_fundno        172 · tna_latest 260 · block 1
+```
+
+`block` differing on even one fundid moves the downstream panel. And it is the
+worst class of failure: it passes on whichever run you check.
+
+> **This is a latent bug in any ladder built this way, not just this copy.**
+> If your linking code derives a matcher index from a joined frame, assume it is
+> affected until you have hashed two cold runs.
+
+### The mechanism
+
+The obvious suspects are tie-breaks — two candidates score identically, which
+wins? Fixing those did **not** fix it, because the divergence was upstream:
+
+```
+build_fund_units()          joins rep ⋈ agg
+        │                   polars does NOT guarantee join output row order
+        ▼
+tgt = units.filter(...)     inherits that order
+        │
+        ▼
+tgt.with_row_index("col")   ← THE LEAK: `col` is positional
+        │
+        ▼
+tfidf_candidates(q, tgt["tgt_norm"].to_list())
+                            corpus order changes ⇒ different rows tie at the
+                            top_n / threshold boundary ⇒ a DIFFERENT SET of
+                            candidates survives, not merely a different winner
+```
+
+So a nondeterministic *join* became a nondeterministic *match set*. Twenty-one
+funds linked in one run and not the other — no tie-break could have fixed that,
+because the losing candidates were never generated.
+
+### The rule
+
+**Any frame whose row order becomes data must be explicitly sorted.** Row order
+becomes data at three points, all of them easy to miss:
+
+| Construct | Why order leaks in |
+|---|---|
+| `.with_row_index()` | the index *is* position |
+| `.unique(subset=…, keep="first")` | "first" is whichever row arrived first |
+| `.group_by(...).agg(pl.col(x).first())` | same, per group, and hash-map order is not stable |
+
+And two that look safe but are not: `rank("ordinal")` assigns tied values in
+frame order, and `group_by` without `maintain_order=True` emits groups in
+hash-map order.
+
+Applied here — every one of these was a real leak:
+
+```python
+# corpus order → candidate set
+return rep.join(agg, on="fund_unit", how="left").sort("fund_unit")
+tgt = tgt.filter(...).sort(["tgt_norm", "fund_unit"])      # before with_row_index
+q   = q.filter(...).sort("fundid")                          # before with_row_index
+
+# "first" must name a defined row
+.sort(["tgt_norm", "series_id", "entity_name"]).unique(subset=[...], keep="first")
+.sort(["fundid", "fund_unit", "col"]).group_by([...], maintain_order=True)
+
+# total tie-break instead of rank("ordinal")
+cand.sort(["fundid", "score", "fund_unit"], descending=[False, True, False])
+    .with_columns(pl.int_range(pl.len()).over("fundid").alias("rk"))
+```
+
+The tie-break sorts end on `fund_unit`, which is unique — that is what makes the
+ordering *total*. A sort that can still tie has not fixed anything.
+
+### Prove it, do not assume it
+
+Determinism is not reviewable by reading. Run the ladder twice from cold and
+hash both:
+
+```bash
+for r in A B; do ./build_npx_crsp_link.py … --out det_$r.parquet; done
+python canonical_hash.py det_A.parquet det_B.parquet --keys fundid
+```
+
+Verified 2026-07-25 — two cold runs, identical:
+`72af0b880b915960ac7e5141195310ed5d20d544b1ceb00c7cf8be4dc0c7074d`
+
+**Pin the library versions too.** Float behaviour in sparse matmul can shift
+between releases, so a crosswalk can change under an upgrade for a reason nobody
+thinks to look for. Verified against: polars 1.41, scikit-learn (TF-IDF
+`char_wb` (2,4)), `sparse_dot_topn.sp_matmul_topn`.
 
 ## Aggregation Traps
 
