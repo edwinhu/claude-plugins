@@ -3,6 +3,24 @@
 All notable changes to this project are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+> Version files are deliberately **not** bumped in this entry. The concurrent
+> `npx-parallel-pull` branch has already claimed 5.79.0–5.83.0, so picking a
+> number here either collides with it or regresses the marketplace version
+> depending on merge order. Bump once, at merge.
+
+### Changed
+- **13F EDGAR scrape (`skills/wrds/scripts/parse_13f/`) — 3.32× faster, output byte-identical.** Full 38-quarter run (248,500 filings, 45.31 GB, 86,444,026 holdings rows) measured end to end on the WRDS grid: **8m 23s → 2m 32s**.
+  - **The wall-clock claim it replaces was wrong by 6×.** `npx-ownership-panel` reported this leg at **1m 23s**, extrapolated by dividing a 13.9 min serial estimate by "10 concurrent, the observed slot count". The per-slot measurement underneath was sound and reproduces here (284 filings/s at 4 slots → 273–291 measured), but the divisor conflates *ten slots* with *ten tasks*: `qconf -srqs` caps each user at **10 slots** in `all.q`, so 4-slot tasks run **two** at a time, not ten. A full run of the unmodified code took **8m 23s**. Two further limits found by submission: `-pe onenode` rejects `N > 8`, and `ssdwork.q` is JSV-blocked despite having 300 free slots.
+  - **Parser: a hand-rolled information-table scanner** (`xml_fast.go`), after `runtime/pprof` attributed **63.4%** of CPU to `encoding/xml.(*Decoder).Token`. It reproduces the exact token sequence `encoding/xml` emits and **refuses** anything it cannot mirror — CDATA, DOCTYPE, multi-colon names, unknown entities, mismatched end tags, non-UTF-8 declarations — falling back to `encoding/xml` for those, so correctness never depends on the scanner being complete. Measured fallback rate 2.6–4.8%. Plus `gzip.BestSpeed`, which halves the only serial stage (`compress/flate` was 9.2% of CPU, exactly the Amdahl serial fraction) for +14.0% bytes on disk. Stdlib only; no new dependencies.
+  - **Array: shard on bytes, one slot per task.** Per-slot throughput is *highest at one slot* (89.3 filings/s) and decays to 57.8 by eight, so under a fixed slot cap many small tasks beat few big ones. Equal-*count* shards were 2× imbalanced because archive path order is CIK order and CIK correlates with filer size; packing on measured file size cuts imbalance to 10.4%. `m_mem_free` 4G → 2G against a measured 454 MB peak RSS.
+  - **Byte-identity proven, not asserted.** Canonical dump (`sort | sha256`) plus row counts, per-column sums and mode/status histograms, over **all 38 quarters**: identical digests, `671ef9d2…`. Independently confirmed by the shared `canonical_hash.py` via parquet, and by a `-verify-fast-xml` harness that parses every filing both ways and compares row structs field by field (12,622 filings, 0 mismatches). Baseline was frozen before any code was written.
+  - `scan_quarter.sh` / `submit_array.sh` are replaced by `scan_shard.sh` / `submit_shards.sh` (plus `make_filelists.sas`, `scan_sizes.py`, `build_shards.py`). The old pair also defaulted to `/scratch/nyu/eddyhu`, which has a 22 GB cap.
+
+### Found, not fixed
+- **13F filings declared `windows-1252` parse to zero holdings rows.** `encoding/xml` refuses a non-UTF-8 declaration when `CharsetReader` is nil; `parseInfoTable` swallows the error and returns no rows, and the filing still lands in the manifest as `parse_status=ok`, `parse_mode=xml`, `n_rows=0`. Measured: **382 of 8,114 filings in 2024Q2 (4.7%)**, 115 of 4,508 in 2016Q4. Left unfixed on purpose — the fix adds rows, and this change had to be byte-identical. Documented with a detection query in `references/13f-scrape-performance.md`.
+
 ## [5.78.0] - 2026-07-24
 
 ### Added

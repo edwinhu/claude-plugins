@@ -166,7 +166,12 @@ func openOutput(path string) (*os.File, io.Writer, func(), error) {
 	}
 
 	if strings.HasSuffix(path, ".gz") {
-		gw := gzip.NewWriter(f)
+		// BestSpeed, not the default level. The writer goroutine is the only
+		// serial stage in the pipeline, and profiling put compress/flate at
+		// 9.2% of total CPU — the entire measured serial fraction. Level 1
+		// cuts that roughly in half for ~15% more bytes on disk, and the
+		// decompressed stream is unchanged either way.
+		gw, _ := gzip.NewWriterLevel(f, gzip.BestSpeed)
 		closer := func() {
 			gw.Close()
 			f.Close()
@@ -200,6 +205,9 @@ func main() {
 	flag.StringVar(&manifestFile, "manifest", "", "manifest output TSV (gzipped if .gz suffix)")
 	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU()*8, "worker goroutines")
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
+	flag.BoolVar(&fastXML, "fast-xml", true, "use the hand-rolled information-table scanner")
+	flag.BoolVar(&verifyFast, "verify-fast-xml", false,
+		"cross-check every fast-scanned filing against encoding/xml (slow; equivalence harness)")
 	flag.Parse()
 
 	if showVersion {

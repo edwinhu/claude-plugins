@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -241,8 +242,50 @@ func extractXMLContent(doc []byte) []byte {
 	return bytes.TrimSpace(doc[start : start+end])
 }
 
+// fastXML selects the hand-rolled information-table scanner in xml_fast.go.
+// verifyFast additionally runs the encoding/xml path on every filing the
+// scanner accepted and reports any divergence — the equivalence harness, not
+// something to leave on in production.
+var (
+	fastXML    = true
+	verifyFast = false
+)
+
 // parseInfoTable parses infoTable elements from the XML content.
 func parseInfoTable(xmlContent []byte, filePath string, meta FilingMeta, pdi primaryDocInfo) ([]Row, error) {
+	if fastXML {
+		if rows, ok := parseInfoTableFast(xmlContent, filePath, meta, pdi); ok {
+			if verifyFast {
+				ref, err := parseInfoTableXML(xmlContent, filePath, meta, pdi)
+				if err != nil || !rowsEqual(rows, ref) {
+					fmt.Fprintf(os.Stderr, "FASTXML-MISMATCH\t%s\tfast=%d\tref=%d\terr=%v\n",
+						filePath, len(rows), len(ref), err)
+				}
+			}
+			return rows, nil
+		}
+		if verifyFast {
+			fmt.Fprintf(os.Stderr, "FASTXML-FALLBACK\t%s\n", filePath)
+		}
+	}
+	return parseInfoTableXML(xmlContent, filePath, meta, pdi)
+}
+
+// rowsEqual reports whether two row slices are identical field-for-field.
+func rowsEqual(a, b []Row) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// parseInfoTableXML is the reference implementation: encoding/xml token walk.
+func parseInfoTableXML(xmlContent []byte, filePath string, meta FilingMeta, pdi primaryDocInfo) ([]Row, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(xmlContent))
 	decoder.Strict = false
 
