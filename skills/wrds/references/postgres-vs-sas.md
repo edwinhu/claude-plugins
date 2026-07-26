@@ -173,7 +173,7 @@ The blocker is usually that the grouping key lives in a *locally built* lookup
 (fuzzy name matching, hand adjudication) rather than in WRDS. That lookup is
 almost always tiny. **Push it up.**
 
-**Worked example** (`examples/voting_ownership_pipeline/build_npx.sas`, measured
+**Worked example** (`../npx-ownership-panel/scripts/build_npx.sas`, measured
 2026-07-25): `risk.voteanalysis_npx` is 238,445,215 rows / **329 GB**. A
 sequential local pull of the 144,376,253-row filtered slice takes ~35 min and
 returns 304 MB. Staging a 26,686-row / 660 KB `fundid → block` crosswalk to
@@ -235,7 +235,7 @@ Actual timings from WRDS cloud (2024), processing 2003–2024:
 
 ## Code Examples
 
-Working implementations are in `examples/voting_ownership_pipeline/` in the WRDS skill — copy and customize rather than rewriting:
+Working implementations are in `../npx-ownership-panel/scripts/` in the WRDS skill — copy and customize rather than rewriting:
 
 | Task | File | Approach |
 |------|------|----------|

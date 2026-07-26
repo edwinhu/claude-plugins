@@ -236,7 +236,7 @@ Three things are wrong with downloading it at all:
    aggregate there.
 
 **Use the year-parallel SGE array pattern:**
-`examples/voting_ownership_pipeline/build_npx.sas` + `run_npx_array.sh`. One task
+`../npx-ownership-panel/scripts/build_npx.sas` + `run_npx_array.sh`. One task
 per year, `SGE_TASK_ID` *is* the year, hash-merge the pushed-up crosswalk,
 accumulate to `(itemonagendaid, block)`, ship ~21 MB back. **Measured: 839s wall
 for 21 years including one straggler node; ~234s without it, vs the 35-minute
@@ -255,7 +255,7 @@ Two traps that pattern already solves:
   ~64%. Carry an `itemonagendaid` hash (848,506 keys) as a semi-join filter.
 
 For building the `fundid → block` crosswalk itself, see
-[`npx-crsp-linking.md`](npx-crsp-linking.md) — that is the genuinely hard half.
+[`npx-crsp-linking.md`](../../npx-ownership-panel/references/npx-crsp-linking.md) — that is the genuinely hard half.
 
 **Use `python3 -u`** when running via `qsub` on WRDS — Python stdout is fully
 buffered when redirected to a log file, hiding all progress until the script

@@ -53,6 +53,23 @@
     and meetingtype in (&MEETINGTYPES.)
 %mend;
 
+/* --- S12 partition ranges --------------------------------------------------
+ * Declared HERE because split_s12.sas (which writes the partitions) and
+ * run_pipeline.sh (which submits one tfn_holdings job per partition) both need
+ * them, and they were previously hardcoded SEPARATELY in each — the same
+ * single-source-of-truth defect as the item universe, one edit away from
+ * submitting jobs for partitions that were never written.
+ *
+ * Balanced by ROW COUNT, not year count: S12 went from ~4M rows/yr pre-2017 to
+ * ~20-26M/yr after. See references/postgres-vs-sas.md.
+ *
+ * SPACE: the full set is ~40 GB on /scratch. WRDS scratch quotas are per-user
+ * and can be far smaller (measured on one account: 22 GB, which cannot hold it).
+ * Check `quota` before a full run; trim this list to fit and the pipeline still
+ * completes end to end over the narrower holdings window.
+ */
+%let S12_RANGES = 2003-2010 2011-2016 2017-2018 2019-2019 2020-2020 2021-2021 2022-2022 2023-2023 2024-2024;
+
 /* MEASURED EFFECT of these two filters on the item frame, 2005-2025 (2026-07-25):
  *
  *   filters            distinct items   raw rows   fanout

@@ -20,6 +20,63 @@
 
 %include "pipeline_config.sas";
 
+/* ==========================================================================
+ * PREREQUISITE GATE — runs before anything else touches the data.
+ *
+ * `qsub -hold_jid` releases a dependent job when its predecessor FINISHES,
+ * regardless of exit status. So a leg that died still lets the merge start.
+ * Nothing in bash can fix that; the check has to live here, where it can see
+ * whether the datasets actually exist. Every invariant this pipeline depends on
+ * is in SAS for exactly this reason — a plain `bash run_pipeline.sh` with no
+ * harness anywhere must be just as safe as a supervised run.
+ * ========================================================================== */
+%macro require_prereqs;
+    %local missing;
+    %let missing = ;
+
+    %if not %sysfunc(exist(out.meetings)) %then %let missing = &missing. out.meetings;
+    %if not %sysfunc(exist(out.inst_own)) %then %let missing = &missing. out.inst_own;
+    %if not %sysfunc(exist(out.npx_items)) %then %let missing = &missing. out.npx_items;
+
+    /* At least one mutual-fund ownership chunk from tfn_holdings_parallel. */
+    %local n_mf;
+    proc sql noprint;
+        select count(*) into :n_mf trimmed from dictionary.tables
+        where libname = 'OUT' and memname like 'MF_OWN%';
+    quit;
+    %if &n_mf. = 0 %then %let missing = &missing. out.mf_own_*;
+
+    /* EVERY year of the N-PX array. A lost SGE task leaves a hole and the array
+     * still reports clean — observed: 20 of 21 outputs, no error anywhere. A
+     * silently short panel is the failure mode this whole design exists to
+     * prevent, so a missing year is fatal, not a warning. */
+    %local y n_cells missing_years;
+    %let n_cells = 0;
+    %let missing_years = ;
+    %do y = &year1. %to &year2.;
+        %if %sysfunc(exist(out.npx_cells_&y.)) %then %let n_cells = %eval(&n_cells. + 1);
+        %else %let missing_years = &missing_years. &y.;
+    %end;
+
+    %put NOTE: PREREQ mf_own_chunks=&n_mf. npx_cell_years=&n_cells./%eval(&year2. - &year1. + 1);
+
+    %if %length(&missing_years.) > 0 %then %do;
+        %put ERROR: N-PX cell dataset(s) missing for year(s):&missing_years.;
+        %put ERROR- Re-run just those years: qsub -t YYYY-YYYY -o logs/ -j y run_npx_array.sh;
+        %let missing = &missing. out.npx_cells_[&missing_years.];
+    %end;
+
+    %if %length(&missing.) > 0 %then %do;
+        %put ERROR: PREREQUISITES MISSING —&missing.;
+        %put ERROR- A predecessor job finished without producing its output.;
+        %put ERROR- hold_jid releases on COMPLETION, not success, so this gate is;
+        %put ERROR- the only thing standing between a dead leg and a wrong panel.;
+        data _null_; abort abend; run;
+    %end;
+    %put NOTE: PREREQ all inputs present;
+%mend;
+%require_prereqs
+
 /* --- Concatenate parallel MF ownership outputs --- */
 data index_own;
     set out.mf_own_:;
