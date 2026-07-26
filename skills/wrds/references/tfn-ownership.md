@@ -566,3 +566,36 @@ Point it **only at the ~4,649 US-domiciled unbridged funds**, matching
 `s12type1.fundname` / `mflink2.fundname_full` against `portnomap.fund_name` + `mgmt_name`.
 That is a small, high-value problem: every fund it resolves moves a row out of
 `s12_ambiguous` and shrinks the union's error term. See the `fuzzy-name-matching` skill.
+
+### Fuzzy name matching: calibrated, and worth doing
+
+Use **`S12_Full_Fund_Names`** (the `S12_Names_20250630.xlsx` on the WRDS index page:
+`FUNDNO, START_DATE, END_DATE, FUNDNAME`, ~238K date-bounded rows), **not**
+`s12type1.fundname`. The latter is truncated to 24 chars and abbreviated; the xlsx carries
+the full and sometimes wholly different canonical name. It covers **95.1%** of the
+ambiguous funds and is strictly longer for **92.0%** of them:
+
+| `s12type1.fundname` | xlsx `FUNDNAME` |
+|---|---|
+| `FIDELITY CNDN GROWTH CO` | `FIDELITY CANADIAN GROWTH COMPANY FUND` |
+| `HERZFELD CARIBBEAN BAS F` | `HERZFELD CARIBBEAN BASIN FUND INCORPORATED` |
+| `DIVERSIFIED INV-BALANCED` | `TRANSAMERICA PARTNERS BALANCED PORTFOLIO` |
+
+Calibration at 2022-12-31 — char_wb 2-4gram TF-IDF + cosine, top-1, against
+`portnomap.fund_name` (55,213 candidates), with **non-US unbridged funds as a negative
+control** (they bridge at 0.3%, so a "match" there is a false positive):
+
+| Threshold | False-positive rate | Ambiguous resolved | Implied precision |
+|---|---|---|---|
+| 0.70 | 3.9% | 51.3% | ~92% |
+| **0.80** | **1.2%** | **32.5%** | **~96%** |
+| 0.90 | 0.4% | 13.7% | ~97% |
+
+**Always calibrate against a negative control, not against ground truth alone.** Top-1
+accuracy measured only on funds that bridge is 92.4% at 0.90 — but every fund there has a
+true match by construction, so that figure cannot transfer to a population where most
+funds have none. The negative control is what makes the precision estimate honest.
+
+At 0.80 this resolves ~1,438 of 4,653 ambiguous funds, cutting union exposure from ~7.7%
+to ~5.3%. A real improvement, not a solution — the remainder still needs the
+`s12_ambiguous` bucket and `detect_unresolved_overlap`.
