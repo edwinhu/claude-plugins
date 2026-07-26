@@ -23,7 +23,7 @@ import (
 	"sync"
 )
 
-const version = "parse_13f_go v0.1.0"
+const version = "parse_13f_go v0.2.0"
 
 // ---------------------------------------------------------------------------
 // TSV serialization
