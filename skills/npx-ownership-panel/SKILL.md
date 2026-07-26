@@ -211,6 +211,40 @@ task took 742 s against a 60 s median and the array still reported clean at
   submitted 11 jobs for a 2-partition list — the bash/SAS divergence the shared
   list exists to prevent.
 
+## Data quality: run the detectors before you use the panel
+
+This skill builds the panel; it does not certify the numbers in it. The sources
+have documented defects, several of which produce a **complete-looking panel with
+plausible values**, so they cannot be caught by eyeballing output.
+
+Before analysis, run the detectors in the `wrds` skill against what you built:
+
+```bash
+uv run python3 tests/ownership_dq_test.py          # 105 assertions, stdlib only
+# then, on your panel, via skills/wrds/scripts/ownership_dq.py
+```
+
+Read `skills/wrds/references/tfn-ownership.md` → **Known Data Defects (D1-D9)**
+first. The ones that bite this pipeline specifically:
+
+| | What it does to this panel |
+|---|---|
+| **D1** split mis-adjustment | Thomson pre-adjusts `shares` wrongly around split dates — *worse* in S12 than 13F (40.7% vs 34.5% outlier rate at >4:1 splits). WRDS's own conclusion is that there is **no clean fix**; winsorize split-adjacent quarters. |
+| **D5** S12 feed change at 2017Q4 | Legacy SP → strategic collection: **+613% CUSIPs, +113% funds**. A genuine coverage expansion, so **no level comparison may span 2017Q4**. Count-based measures are unusable across it; share-based ones are mildly contaminated. |
+| **D8** Int8 date overflow | Not a vendor defect — *yours*. `dt.month() * 100` overflows polars' Int8 and silently yields a valid-looking wrong date key. It once left a reference panel holding only March and December, which zeroed ownership for 49% of a panel and read as D1 for weeks. |
+| **D9** ownership > 100% | Partly real: 13F is long-only, so lent shares are counted twice and >100% is **correct** for heavily shorted stocks (0.51% → 22.95% violation rate across short-interest buckets). **Do not clip at 100%** — that destroys real information. |
+
+Two habits worth carrying over, both learned the expensive way here:
+
+1. **Run `detect_calendar_bucket_gap` on every reference/dimension table at build
+   time**, not just on the output panel. It is the one detector that catches a root
+   cause rather than a symptom — a reference table missing a calendar bucket makes
+   every downstream join fall back to a default, silently.
+2. **A lent share carries no vote for the lender.** If you are using ownership as a
+   *voting* weight, it overstates the block by roughly the securities-lending rate —
+   ~1.5pp at the median, >12pp in heavily shorted names. Net it out or report
+   robustness excluding high-short-interest firm-quarters.
+
 ## References
 
 | File | What |
