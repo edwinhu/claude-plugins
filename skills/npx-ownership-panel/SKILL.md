@@ -9,9 +9,10 @@ Builds `out.pass_npx` — item-level ownership joined to each item's per-block
 observed For/Against/Abstain split — entirely on the WRDS grid.
 
 **Verified end-to-end from a clean checkout on 2026-07-25.** One bash command,
-WRDS credentials, nothing else: 12m 17s wall, zero errors, `out.pass_npx` at
-2,018,866 rows. The measured run is in [Verification](#verification) below —
-the one-command claim is measured, not asserted.
+WRDS credentials, nothing else: **34m 46s** wall at full scale, zero errors,
+`out.pass_npx` at 2,018,866 rows. Cold from nothing — including building the
+crosswalk and the 13F holdings — is **≈47 min**. Both are in
+[Verification](#verification); the one-command claim is measured, not asserted.
 
 ## Why this exists as a skill
 
@@ -92,26 +93,23 @@ Both fired during verification and caught real failures. That is the point.
 
 ## Verification
 
-Clean checkout on WRDS, one `bash run_pipeline.sh`, 2026-07-25:
+Clean checkout on WRDS, one `bash run_pipeline.sh`, 2026-07-25. Two runs, both clean:
 
-| | |
-|---|---|
-| Wall clock | **12m 17s** (20:49:55 → 21:02:12) |
-| `ERROR` lines, all logs | **0** |
-| PREREQ gate | `mf_own_chunks=2 npx_cell_years=21/21` → all inputs present |
-| UNIVERSE gate | `meetings_items=623,642 npx_items=712,466` **orphans=0** |
+| Run | S12 scope | Wall | `ERROR` lines |
+|---|---|---:|---:|
+| Reduced | 2 of 9 partitions | **12m 17s** | 0 |
+| **Full** | **9 of 9 partitions** | **34m 46s** | **0** |
 
-Leg boundaries:
+Gates on the full run: `PREREQ mf_own_chunks=9 npx_cell_years=21/21` · `UNIVERSE
+meetings_items=623,642 npx_items=712,466 orphans=0`.
 
-| Leg | Measure | Value |
-|---|---|---|
-| 1 S12 | partition rows | 22,369,087 (2019) · 25,076,427 (2023) |
-| 3 N-PX | vote rows kept | **140,382,295** |
-| 3 N-PX | cells before re-agg | 2,130,231 |
-| 3 N-PX | unlinked vote rows | **0** |
-| 4 crosswalk | fundids / item frame | 26,686 / 712,466 |
+S12 partitions (237.5M rows total): 34,212,190 · 27,141,268 · 29,551,018 ·
+22,369,087 · 23,985,898 · 25,693,786 · 26,528,617 · 25,076,427 · 22,936,627.
 
-Final panel — `out.pass_npx`, grain `(itemonagendaid, block)`, **2.28 GB**:
+N-PX leg: **140,382,295** vote rows kept, 2,130,231 cells pre-aggregation, **0
+unlinked**. Crosswalk: 26,686 fundids, 712,466-item frame.
+
+Final `out.pass_npx`, grain `(itemonagendaid, block)`, **2.28 GB**:
 
 ```
     n_rows      n_items   items_no_npx      vote_rows
@@ -124,13 +122,68 @@ passive       533,516       8,045,939
 asset_owner   299,714       2,596,663
 ```
 
-**One scope caveat, stated plainly.** The S12 leg ran over 2 of 9 partition
-ranges (2019, 2023). The full set is ~40 GB and this account's `/scratch` quota
-is **22 GB** — measured, `dd` fails with "Disk quota exceeded". Every other leg
-ran at full scale. Check `quota` and trim `S12_RANGES` in `pipeline_config.sas`
-to fit; the chain completes either way over a narrower holdings window.
+> Both runs produced an **identical panel**. The S12 leg populates mutual-fund
+> ownership *columns* through `MERGE_ASOF`; it does not add rows. More partitions
+> means more of those columns are non-missing, not a bigger panel.
 
-Three real defects surfaced by running it, all fixed:
+### Cold vs warm
+
+"Warm" = the crosswalk and the 13F holdings already on disk. Cold builds them.
+
+| Term | Time | Basis |
+|---|---:|---|
+| **WARM — 4-leg pipeline** | **34m 46s** | **MEASURED**, full-scale clean-room run |
+| (a) SEC series/class download | 1m 43s | MEASURED — 17 vintages, 128 MB, 0.5 s inter-request sleep |
+| (a) `build_sec_series_master` | 10s | MEASURED |
+| (b) `pull_npx_funds` | 6m 31s | MEASURED — server-side aggregation over 238M rows |
+| (b) `pull_crsp_funds` | 7s | MEASURED |
+| (b) crosswalk ladder | 2m 30s | MEASURED — TF-IDF over 26,929 fundids |
+| **(c) 13F EDGAR parse** | **1m 23s** | **EXTRAPOLATED** — see below |
+| **COLD TOTAL** | **≈ 47 min** | sum of the above |
+
+**(c) method.** One recent dense quarter measured on a 4-slot compute node,
+reading `/wrds/sec/archives` directly — never per-filing SEC.gov HTTP
+(`edgar.md` iron law; on the grid the archive is a local mount, so no rclone leg
+at all):
+
+> **2024Q2: 7,680 filings · 1.44 GB input · 27 s parse wall · 2,489,014 rows ·
+> 66.5 MB gz output** → **284 filings/s** at `GOMAXPROCS=4`, concurrency 32.
+
+Extrapolated across the **38 quarters 2016Q4–2026Q1**, weighted by actual filings
+per quarter from `wrdssec_all.wrds_forms` — **237,094 filings**, 44 GB input,
+~77M output rows. Weighting is not cosmetic: a flat `38 × 2024Q2` would say
+291,840 filings, **+23.1% too high**, because quarterly volume ranges 4,255 to
+9,076 over the span.
+
+- Serial (one 4-slot task): **13.9 min**
+- 38-shard SGE array, 10 concurrent (**the observed slot count** on this
+  cluster): **1m 23s** — the figure used in the table
+- 38-shard array, full parallelism: 32 s (not claimed; the scheduler does not
+  give 38 slots)
+
+**The 35-minute local N-PX pull is gone from the cold path entirely.** The old
+design downloaded 144,376,253 joined rows to a laptop — measured at ~35 min
+sequential — before any analysis could start. The array reads
+`risk.voteanalysis_npx` on the grid and ships 2.25M cells instead. That single
+change is worth more than every other term in the cold budget combined, and it
+is why cold-from-nothing is ~47 min rather than ~80.
+
+**Straggler risk.** A 21-task array over shared NFS will hit one often enough
+that the with-straggler figure is the planning number, not the best case. One
+task took 742 s against a 60 s median and the array still reported clean at
+20 of 21 outputs — which is why `merge_panel.sas` asserts coverage.
+
+### Scope caveats
+
+- The reduced run used 2 of 9 S12 partitions because that account's `/scratch`
+  quota is **22 GB** against the ~41 GB the full set needs — measured, `dd`
+  fails with "Disk quota exceeded". The full run used a directory with headroom.
+  Check `quota` and trim `S12_RANGES` in `pipeline_config.sas` to fit; the chain
+  completes either way over a narrower holdings window.
+- (c) is the only extrapolated term. Everything else was run.
+
+### Three defects the clean-room run surfaced, all fixed
+
 - `tfn_holdings_parallel.sas` used **open-code `%IF`**, which errors on this SAS
   deployment. As shipped it had never run — it died before reading a row.
 - `split_s12.sas` and `run_pipeline.sh` hardcoded the partition list
