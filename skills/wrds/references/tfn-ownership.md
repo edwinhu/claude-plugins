@@ -74,8 +74,13 @@ WHERE b.shares > 0
 ### Step 3: Adjust shares via CRSP factors
 
 ```python
-shares_adj = shares * cfacshr  # CRSP adjustment factor aligned at vintage date
+shares_adj = shares * cfacshr  # CRSP adjustment factor aligned at vintage date (fdate)
 ```
+
+> **This step is where the panel breaks around splits.** Thomson has *already*
+> pre-adjusted `shares` to the FDATE vintage, and does so incorrectly in a documented
+> fraction of cases. Multiplying by `cfacshr` again compounds the error rather than
+> fixing it. See **Known Data Defects → D1** below before trusting any split-era quarter.
 
 ### Step 4: Aggregate to permno-quarter
 
@@ -226,3 +231,160 @@ See `postgres-vs-sas.md` for the full decision framework.
     - For post-2017 analysis: expect ~40% of "US country" s12 funds unbridged; report coverage alongside MF aggregates
     - For global analysis: build your own bridge (by fund name, ticker, or manager ID)
 13. **passive_pct 100× scaling in `pass.sas7bdat`** -- `1-make.sas` line 705 multiplies `PASSIVE_PCT` by 100 when merging `index_own` into the panel. If `index_own.PASSIVE_PCT` is already in percent scale (0-100) rather than fraction (0-1), the stored value ends up at 0-10000 scale. Always inspect `describe()` after loading; divide by 100 if max > 100.
+
+---
+
+## Known Data Defects (WRDS research notes + measured)
+
+WRDS publishes its S12/S34 defect notes at
+[Manuals and Overviews → LSEG → Mutual Fund and Investment Company](https://wrds-www.wharton.upenn.edu/pages/support/manuals-and-overviews/lseg/mutual-fund-and-investment-company/)
+(institutional auth required). The notes are filed under Thomson Reuters, Refinitiv, and
+LSEG interchangeably — same feed, three vendor names, `tfn` libname throughout.
+
+**Detectors for every defect below:** `skills/wrds/scripts/ownership_dq.py`.
+**Tests:** `tests/ownership_dq_test.py` (stdlib only — `uv run python3 tests/ownership_dq_test.py`).
+
+### D1. Split adjustment is wrong around split dates — the big one
+
+**Source:** *Note on Splits in TR Mutual Funds and 13F: S12 and S34*, WRDS Research,
+March 7 2017.
+
+The note's running example is **permno 14593 (Apple)** — the same firm where our panel
+breaks. Documented failure modes:
+
+| Case | What Thomson reports | What is correct |
+|------|---------------------|-----------------|
+| Double adjustment | 226,331 = 4,619 × 7 × 7 | 32,333 = 4,619 × 7 |
+| Adjustment at the wrong date | MasterCard shares adjusted at 2013-12-31, before the 2014-01-21 ex-date | adjust at ex-date |
+| Compounded on carry-forward | stale rows re-adjusted each vintage | adjust once |
+
+Magnitude, from the note: outlier rates in ΔOwnership around split quarters run
+**13.8% at Qtr(0) and 14.1% at Qtr(−1) for 13Fs** against a 5% null — and scale with
+split size: **32.4% at split factor 4, 34.5% above 4**. The note's own tests rule out the
+obvious explanations: restricting to `rdate == fdate` (no carry-forwards) does *not*
+help, and neither does restricting to splits whose ex-date and record date share a
+quarter.
+
+**WRDS's own conclusion: there is no clean systemic fix.** Their suggestion is to trim or
+winsorize Qtr(−1), Qtr(0), Qtr(+1) around each split.
+
+**This explains measured finding #1** — the AAPL 4.5× swing with a flat owner count.
+AAPL's split ex-dates (2014-06-09, 7:1; 2020-08-31, 4:1) both fall in Jun/Sep quarters,
+and a handful of catastrophically over-adjusted quarters is enough to move a 23-quarter
+mean by 4.5× while the set of reporting managers never changes. The owner count is flat
+because the filers are all still there — only the share *units* are wrong.
+
+**Consequence for the build:** repairing `HAVING fdate = MIN(fdate)` vintage selection
+alone will **not** fix this. The defect is in Thomson's pre-adjustment of `shares`, not in
+which vintage you pick. Winsorizing split-adjacent quarters is the documented mitigation;
+sourcing post-2013 holdings from EDGAR 13F is the alternative.
+
+### D2. FDATE vs RDATE — and a contradiction between two WRDS documents
+
+- `RDATE` = report date, the date the holdings are actually valid for.
+- `FDATE` = **vintage** date; the primary key for table joins and the date Thomson's
+  share adjustments are made *to*.
+
+*WRDS Overview of Thomson Reuters Mutual Fund and Investment Company Data* is explicit:
+"SHARES values are adjusted for stock splits that occur between the linked RDATE and
+FDATE… the pre-adjustment may not be correct in all cases." The May 2017 S34 note agrees:
+"Thomson's FDATE is a vintage date, and is used primarily for share adjustments using
+CRSP cumulative share adjustment factors."
+
+⚠️ **The splits note contradicts both.** Its table legend reads "Column 1 is the vintage
+date of the holding data, Rdate… Column 2, Fdate, is the date when holdings are valid" —
+exactly backwards. The Overview and the S34 note agree with each other and with the
+observed data, so **FDATE = vintage** is the reading to use; the splits note's legend is
+an error in the note. Recorded here because acting on the splits note's legend inverts
+your join and silently produces the D1 defect on purpose.
+
+### D3. Coverage collapses after ~2013, then again in 2019
+
+**Source:** *Research Note Regarding Thomson-Reuters Ownership Data Issues*, May 2017.
+
+- **Stale and dropped filers.** BlackRock (mgrno 9385) carried forward stale from 2013Q3,
+  then **entirely missing 2014-06 through 2015-03**, then returned at $48B against a true
+  ~$700B+. Fixed in the 2018 regeneration.
+- **Excluded securities.** ~30% of the universe / ~15% of market cap dropped after June
+  2013; **all ETFs gone by 2015**. Do not use S34 for ETF holdings, ever.
+- **AAPL specifically: zero institutional owners from 2015-06-30 onward** in the vintage
+  current at that time — and the 2014-06-30 row jumps 516,786,227 → 3,665,520,154, the
+  unadjusted 7:1 split (D1 again).
+- Aggregate error: 2015 institutional ownership is 58.25% in S34 against 71.8% in the
+  actual 13F filings — **19.4% of total institutional ownership missing**.
+
+**Feb 2022 note** (*Thomson/Refinitiv Data Issues 13F (S34) and Mutual Fund Holdings
+(S12)*): 13F holdings largely missing in **2019Q3–Q4** — filers per stock fell from 1,500+
+to under 500 for AAPL/IBM/MSFT; 1,386 of 12,224 stocks lost >10% of institutional
+ownership, median −48%. Also flags **2011-03 to 2013-03** as significantly incomplete
+(consistent with the Koijen–Yogo footnote). WRDS froze the web query at 2019Q2 and moved
+later data to `/wrds/tfn/sasdata/s34/incomplete`.
+**April/August 2022 notes:** Refinitiv patched 2019Q3–Q4 and the S12 2017Q4/2019Q4 gaps.
+Pre-2011 issues are **permanently unfixable** — "the data vendor no longer provide the
+support for the vintage raw data."
+
+→ Detector: `detect_owner_dropout` (owners collapse = feed defect) as opposed to
+`detect_flat_owner_share_swing` (owners flat = units defect). Run both; the pair
+*classifies* the break.
+
+### D4. 2010–2016 was regenerated; an archive of the corrupt data exists
+
+**Source:** *S12/S34 Regenerated Data (2010–2016)*, June 2018. Thomson's legacy systems
+were "losing and corrupting data" from 2010. The regenerated data is in `/wrds/tfn/sasdata`;
+the corrupted original is preserved at **`/wrds/tfn/sasdata_archive`** — use it to
+reconcile against results published before 2018. Residual known issues: S12TYPE8 lost a
+third of its coverage after 2013; a 2014 mutual-fund ownership blip (29%→35%→30%) likely
+from double-counted funds; S34TYPE2 still excludes ~$1T of CRSP securities; a 5% ownership
+drop at the 2010-12→2011-03 feed migration.
+
+### D5. S12 feed change at 2017Q4 — a coverage *increase* that looks like a defect
+
+**Source:** *Thomson/Refinitiv Data Feed Change from Legacy SP to Strategic Collection in
+S12*, 2023-01-24. From 2017Q4 the S12 feed switched from legacy SP to "strategic
+collection", backfilled in 2022Q4. **CUSIPs in fund holdings +613%, unique funds +113%,
+fund-CUSIP observations +265%**, and 34,385 funds appear that did not exist in the old
+feed. Cause: overseas holdings, ADRs, preferreds and bonds got CUSIPs assigned that the
+legacy feed lacked — it is a genuine coverage expansion, not corruption. But any
+level-comparison spanning 2017Q4 is invalid, and **MFLINKS was not backfilled** for
+2017Q4–2020Q2, so `wficn` bridge rates drop precisely there. WRDS's own advice is to use
+Factset or CRSP to identify US equity funds over that window.
+
+This corroborates the measured MFLINKS bridge-rate cliff (§Common Gotchas #12: ~77%
+pre-2017 → ~58–66% after).
+
+### D6. 13F `value` units change at 2023Q1 — measured, NOT documented by WRDS
+
+Form 13F `value` moves from thousands to whole dollars. Measured on the EDGAR panel:
+mean value per holding 152,644 (2022Q4) → 12,794,119 (2023Q1); **median 442×, p90 494×,
+p10 only 38×**.
+
+The break is **not a clean 1000×**. The post-2023Q1 population is mixed — filers converted
+on different schedules — so **no scalar repairs it**, and any sum or average of `value`
+spanning 2023Q1 is meaningless. Note the legacy S34 spec still labels the field
+"Holding Value (x$1000)".
+
+**No WRDS note documents this.** The gap is itself worth knowing: the S12/S34 defect notes
+stop at the 2023 S12 feed change and say nothing about 13F value units. Treated as a
+source property to detect and refuse to aggregate across, not to repair.
+
+→ Detector: `detect_unit_discontinuity`, which reports `clean_break=False` when the
+quantile shifts disagree — the signal that rescaling is not an option.
+
+### D7. Encoding-driven silent parse failures — measured, parser-side
+
+Windows-1252 filings parsed to **zero** holdings rows: 7,023 filings / 2,628,463 rows /
+768 institutions across all 38 quarters, with a **3.47× step at 2023Q3** (5.54% of
+holdings dropped after vs 1.60% before), concentrated by filing agent. Now fixed, but the
+class recurs with any new vendor encoding — a parser that yields nothing is
+indistinguishable from a filer that held nothing.
+
+→ Detector: `detect_zero_row_cohort`, grouped by encoding *or* filing agent, with
+per-period rates so a time-varying step is visible rather than averaged away.
+
+### Cross-check: EDGAR 13F is clean where Thomson is not
+
+Same firm (AAPL), EDGAR `13F-HR` / `shares_type=SH` / no amendments: quarterly variation
+of a few percent, filer counts monotone, and the 2020 4:1 split appearing exactly once and
+correctly unadjusted (2.59bn → 9.70bn at 2020Q3). The defect is Thomson's, not the
+concept's. Thomson's remaining advantage is history: it starts 1980, EDGAR electronic
+filings start 1999 and XML only in 2013.
