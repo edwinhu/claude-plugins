@@ -43,6 +43,7 @@ __all__ = [
     "detect_zero_row_cohort",
     "detect_bridge_rate_regression",
     "detect_duplicate_grain",
+    "detect_unresolved_overlap",
     "COMMON_SPLIT_FACTORS",
 ]
 
@@ -745,6 +746,82 @@ def detect_duplicate_grain(
             metrics=metrics,
         )
     ]
+
+
+def detect_unresolved_overlap(
+    records: Sequence[dict],
+    *,
+    source_col: str = "source",
+    resolved_col: str = "bridged",
+    secondary_source: Any = "s12",
+    period_col: str | None = None,
+    max_unresolved_rate: float = 0.05,
+) -> list[Finding]:
+    """Union of two sources where membership overlap was never resolved.
+
+    When you merge a primary and a secondary source at the record level, every secondary
+    record must be classifiable as either *genuinely absent* from the primary (safe to
+    add) or *present but unlinked* (adding it double-counts). Records that are neither
+    are the union's silent error term, and no downstream statistic exposes them.
+
+    Reference case: coalescing Thomson S12 into `crsp.holdings`. Measured at 2022-12-31 --
+    non-US funds bridge at 0.3%, which sounds catastrophic but simply means CRSP never
+    covered them, so they are safe additions. The real exposure is **US-domiciled funds
+    that fail to bridge: 4,649 of 60,184 (~7.7%)**. Those could be new funds or duplicates
+    of funds CRSP already carries, and nothing in the data distinguishes them.
+
+    So the headline bridge rate is the wrong number to watch -- 12.2% globally versus a
+    ~7.7% true ambiguity. This detector wants the *classified* population: records
+    already tagged with which source they came from and whether they resolved against the
+    other. It reports the unresolved secondary mass, per period when `period_col` is set.
+
+    Default threshold is deliberately tight (5%). An unresolved union is not a rounding
+    error; it is an unbounded bias whose sign you do not know.
+    """
+
+    def _rate(rows: Sequence[dict]) -> tuple[int, int]:
+        secondary = [r for r in rows if r.get(source_col) == secondary_source]
+        unresolved = [r for r in secondary if not r.get(resolved_col)]
+        return len(unresolved), len(rows)
+
+    findings: list[Finding] = []
+
+    def _emit(period: Any, rows: Sequence[dict]) -> None:
+        n_unresolved, n_total = _rate(rows)
+        if not n_total:
+            return
+        rate = n_unresolved / n_total
+        if rate <= max_unresolved_rate:
+            return
+        findings.append(
+            Finding(
+                kind="unresolved_overlap",
+                entity=secondary_source,
+                period=period,
+                detail=(
+                    f"{n_unresolved:,} of {n_total:,} records ({rate:.1%}) come from "
+                    f"{secondary_source!r} without resolving against the primary source "
+                    f"-- each is either new coverage or a duplicate, and the data does "
+                    f"not say which"
+                ),
+                metrics={
+                    "unresolved_rate": rate,
+                    "n_unresolved": n_unresolved,
+                    "n_total": n_total,
+                    "threshold": max_unresolved_rate,
+                },
+            )
+        )
+
+    if period_col is None:
+        _emit(None, list(records))
+    else:
+        by_period: dict[_dt.date, list[dict]] = {}
+        for rec in records:
+            by_period.setdefault(_as_date(rec[period_col]), []).append(rec)
+        for period in sorted(by_period):
+            _emit(period, by_period[period])
+    return findings
 
 
 def from_dataframe(df: Any, detector: Callable[..., list[Finding]], **kwargs: Any):

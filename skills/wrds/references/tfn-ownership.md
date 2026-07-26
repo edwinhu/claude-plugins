@@ -486,3 +486,83 @@ Never compare levels across 2017Q4 if Thomson is in the series (D5). Cross-check
 Thomson against CRSP over the overlap is worthwhile, but expect a gap rather than a
 match: per the Jan 2023 note, CRSP sources monthly N-PORT while Thomson sources quarterly
 N-Q/N-CSR, so holdings "should be close, but not exact."
+
+---
+
+## Coalescing S12 into `crsp.holdings` at the holding level
+
+Use `crsp.holdings` as primary and Thomson S12 as *additive* coverage, merged at the
+individual fund-holding grain. Aggregate-level coalescing is not safe — the two sources
+differ in share units (D1), fund population, and filing basis, so a filled series
+confounds source with signal.
+
+### The bridge is the constraint, and it is not fixable by better identifiers
+
+S12 `fundno` → `crsp_portno` (via `mflink2` → `mflink1` → `portnomap`), measured:
+
+| Quarter | S12 funds | Bridged | Rate |
+|---|---|---|---|
+| 2010-12-31 | 7,494 | 3,647 | 48.7% |
+| 2016-12-31 | 14,427 | 4,982 | 34.5% |
+| 2022-12-31 | 60,136 | 7,325 | **12.2%** |
+
+**Thomson S12 carries no CIK** — there is no SEC identifier anywhere in the
+`tr_mutualfunds` schema, so a CIK bridge is impossible. The only exact alternative key is
+`s12type8.fticker`, and it is a dead end twice over: the table **ends 2018-12-31**, and
+where it does exist it is almost entirely redundant with MFLINKS:
+
+| Quarter | MFLINKS | Ticker | **Incremental** | Combined |
+|---|---|---|---|---|
+| 2010-12-31 | 48.7% | 38.3% | **+17 funds** | 48.9% |
+| 2016-12-31 | 34.5% | 19.1% | **+71 funds** | 35.0% |
+| 2018-12-31 | 15.7% | 6.6% | **+218 funds** | 16.2% |
+
+That redundancy is the important result: **the unbridged mass is not unbridged for want
+of an identifier — those funds are simply not in CRSP.** Expect fuzzy name matching to
+fail for the same reason, and scope it accordingly (below).
+
+### The 12% headline is misleading — split by domicile
+
+| 2022-12-31 | Funds | Bridged | Unbridged |
+|---|---|---|---|
+| non-US | 48,355 | **0.3%** | 48,210 — CRSP never covered these; **safe to add** |
+| US | 11,829 | **60.7%** | **4,649 — genuinely ambiguous** |
+
+(2016-12-31: non-US 2.0% bridged; US 78.5%, 1,321 ambiguous.)
+
+True double-count exposure is **~7.7% of funds**, not 88%.
+
+### Recipe
+
+Classify every S12 fund into exactly one of three buckets, then merge:
+
+| Bucket | Rule | Action |
+|---|---|---|
+| `crsp` | bridges to a `crsp_portno` | take the **CRSP** holding — as-reported shares, `permno` pre-mapped |
+| `s12_additive` | unbridged **and** positively CRSP-excluded (non-US `country`, closed-end, VA separate account, UCITS) | take the **Thomson** holding |
+| `s12_ambiguous` | unbridged, US-domiciled, no positive classification | **exclude by default; report the mass** |
+
+Non-negotiables:
+
+1. **Normalize share units before merging, never after.** CRSP is as-reported; Thomson is
+   pre-adjusted to FDATE and wrongly so (D1). Apply `cfacshr` yourself, once, to the
+   merged column. Merging raw `shares` mixes units inside one column and manufactures the
+   exact discontinuity `detect_unit_discontinuity` exists to catch.
+2. **Winsorize split quarters on `source='s12'` rows only.** D1 is a Thomson defect; CRSP
+   rows do not need it and winsorizing them discards real data.
+3. **Dedup after bridging, at the `wficn`/`crsp_portno` grain — never `fundno`.** One
+   `wficn` maps to a mean ~3.5 `crsp_fundno`; the wrong key inflates ~3.95× (D5b).
+   Verify with `detect_duplicate_grain`.
+4. **Carry a `source` column into the output.** A merged panel that cannot say where each
+   row came from cannot be audited, and every check below needs it.
+
+→ Guard: `detect_unresolved_overlap` reports the ambiguous mass and fails above 5%. Run it
+per period — exposure grows over time as S12's non-US population expands.
+
+### Where fuzzy name matching is worth it
+
+Not against all 48K unbridged funds — they are not in CRSP and no matcher will find them.
+Point it **only at the ~4,649 US-domiciled unbridged funds**, matching
+`s12type1.fundname` / `mflink2.fundname_full` against `portnomap.fund_name` + `mgmt_name`.
+That is a small, high-value problem: every fund it resolves moves a row out of
+`s12_ambiguous` and shrinks the union's error term. See the `fuzzy-name-matching` skill.

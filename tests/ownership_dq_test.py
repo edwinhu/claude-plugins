@@ -435,6 +435,64 @@ check(
 )
 
 # ===========================================================================
+# S12 x crsp.holdings union: the unresolved-overlap guard
+# ===========================================================================
+print("\nUnion: unresolved-overlap detector")
+
+# Measured composition at 2022-12-31, scaled down 10x. Of 60,184 funds:
+#   crsp-bridged       7,180  -> source=crsp
+#   non-US unbridged  48,210  -> source=s12, safe (CRSP never covered them)
+#   US unbridged       4,649  -> source=s12, AMBIGUOUS (~7.7%)
+union_panel = (
+    [{"rdate": dt.date(2022, 12, 31), "source": "crsp", "bridged": True} for _ in range(718)]
+    + [
+        {"rdate": dt.date(2022, 12, 31), "source": "s12", "bridged": True, "note": "non-US, classified"}
+        for _ in range(4821)
+    ]
+    + [
+        {"rdate": dt.date(2022, 12, 31), "source": "s12", "bridged": False, "note": "US unbridged"}
+        for _ in range(465)
+    ]
+)
+overlap = dq.detect_unresolved_overlap(union_panel)
+check("fires on the unresolved US-unbridged mass", len(overlap) == 1, f"got {len(overlap)}")
+check(
+    "quantifies it near the measured 7.7%",
+    overlap and 0.070 <= overlap[0].metrics["unresolved_rate"] <= 0.085,
+    f"{overlap[0].metrics['unresolved_rate']:.3f}" if overlap else "",
+)
+check(
+    "says plainly the data cannot distinguish new coverage from duplication",
+    overlap and "does not say which" in overlap[0].detail,
+)
+# Classifying the non-US mass as resolved is what makes the union safe -- if you
+# instead leave every unbridged fund unclassified, exposure is 88%, not 8%.
+naive = [
+    dict(r, bridged=False) if r["source"] == "s12" else r for r in union_panel
+]
+check(
+    "naive union (nothing classified) is far worse",
+    dq.detect_unresolved_overlap(naive)[0].metrics["unresolved_rate"] > 0.85,
+)
+check(
+    "clean once every secondary record is classified",
+    dq.detect_unresolved_overlap(
+        [dict(r, bridged=True) for r in union_panel]
+    )
+    == [],
+)
+check(
+    "reports per-period when asked",
+    len(
+        dq.detect_unresolved_overlap(
+            union_panel + [dict(r, rdate=dt.date(2016, 12, 31)) for r in union_panel],
+            period_col="rdate",
+        )
+    )
+    == 2,
+)
+
+# ===========================================================================
 # F4. Unit discontinuity in `value` at 2023Q1 -- and its non-uniformity
 # ===========================================================================
 print("\nF4: unit-discontinuity detector on any value column")
