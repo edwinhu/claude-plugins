@@ -97,6 +97,16 @@ on slot-seconds** (3,897 → 1,376). B→C isolates the array shape: a further
 per slot), better occupancy (7.24 → 8.36 of 10 slots) and a much shorter tail
 (task p90 13.4 s → 6.1 s). End to end, **A→C is 3.32×**.
 
+> **Read makespan with the queue depth attached.** None of these three runs had
+> all ten slots to itself — mean occupancy was 7.74 (A), 7.24 (B) and 8.36 (C)
+> of 10, because a second job stream shared the account throughout. Makespan is
+> therefore *pessimistic and not exactly reproducible*; the contention-robust
+> number is **filings/s per slot**, which is computed from slot-seconds and is
+> unaffected by queue wait. Comparisons between A, B and C are sound because all
+> three ran under comparable contention. On a grid where all ten slots were
+> genuinely free, run C's per-slot rate implies **248,500 / (195.9 × 10) ≈ 127 s**
+> — a projection, not a measurement.
+
 **Observed-slot vs full-parallelism, stated separately as they must be:**
 
 | Basis | Wall clock | Status |
@@ -159,15 +169,18 @@ Measured answers to the four questions:
 | Question | Answer | Basis |
 |---|---|---|
 | **Shard key** | Byte-balanced packing (LPT) **within quarter**, ~200 MB per shard | Contiguous equal-*count* chunks gave a **2× duration spread** (19.4 s vs 42.8 s for two 2,254-filing chunks of 2016Q4): archive path order is CIK order, and CIK correlates with filer size. Packing on measured bytes cuts imbalance to 10.4%. Sharding within quarter keeps the output quarter-partitioned, which is what the panel consumes, at negligible balance cost. |
-| **Slot count** | **1 slot per task**, array self-throttles to 10 | Per-slot throughput 89.3 f/s at 1 slot vs 57.8 at 8. Confirmed at full scale: 199.2 vs 180.6 f/s per slot (run C vs run B). |
+| **Slot count** | **1 slot per task**, array self-throttles to 10 | Per-slot throughput 89.3 f/s at 1 slot vs 57.8 at 8. Confirmed at full scale: 195.9 vs 180.6 f/s per slot (run C vs run B). |
 | **Memory per task** | **`m_mem_free=2G`** | Peak RSS 454 MB at one slot. The previous 4G was an ~8× over-reserve. |
 | **Staging vs parsing** | **Fused — no staging stage at all** | `/wrds/sec/archives` is mounted directly on the compute nodes. There is nothing to stage: rclone is for moving filings *off* WRDS. A copy-first design would add a pointless pass over 45 GB. `sys` CPU is 3% of `user` CPU, so NFS is not a bottleneck at ten slots. |
 
 Shard granularity has a floor. At 200 MB the median task runs 5.6 s against a
 4 s `schedule_interval`, and mean occupancy was 8.36 of 10 slots — ~16% lost to
 dispatch gaps. Coarser shards waste less on dispatch but leave a longer tail.
-200 MB measured best of the granularities tried; going much below that trades
-tail for dispatch.
+
+> **Not established:** whether 200 MB is the optimum. A 400 MB / 114-shard
+> comparison run was submitted and then **cancelled** to free slots for a
+> concurrent job, so the tail-versus-dispatch trade is reasoned, not measured.
+> 200 MB is a working choice that measured well, not a tuned one.
 
 ## Byte-identity method
 
