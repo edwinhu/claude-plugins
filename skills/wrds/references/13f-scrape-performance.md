@@ -91,6 +91,14 @@ end − first task start, so scheduling gaps are included):
 | **A** | shipped | 38 quarter shards × 4 slots | **503.4 s (8m 23s)** | 493.6 | 63.8 |
 | **B** | optimised | 38 quarter shards × 4 slots | **190.0 s (3m 10s)** | 1,307.7 | 180.6 |
 | **C** | optimised | 230 byte-balanced shards × 1 slot | **151.8 s (2m 32s)** | 1,637.3 | 195.9 |
+| **E** | optimised **+ charset fix** | 230 byte-balanced shards × 1 slot | 301.9 s † | 823.1 † | 183.7 |
+
+† Run E was deliberately throttled to 4–8 concurrent tasks (`qsub -tc`) to leave
+slots for a concurrent goal-critical job, so its mean occupancy was 4.48 of 10
+and its makespan is not comparable to A–C. Its **per-slot** rate is: the charset
+fix costs **6.2%** of throughput (195.9 → 183.7 filings/s per slot) for the 3.04%
+more rows it recovers and the transcoding it does. At full occupancy it projects
+to ~135 s.
 
 A→B isolates the parser change (same array shape): **2.65× on makespan, 2.83×
 on slot-seconds** (3,897 → 1,376). B→C isolates the array shape: a further
@@ -182,6 +190,84 @@ dispatch gaps. Coarser shards waste less on dispatch but leave a longer tail.
 > comparison run was submitted and then **cancelled** to free slots for a
 > concurrent job, so the tail-versus-dispatch trade is reasoned, not measured.
 > 200 MB is a working choice that measured well, not a tuned one.
+
+## What a canonical-hash identity test does not prove
+
+**It proves a refactor was faithful. It cannot prove the behaviour was right.**
+
+The optimisation below passes identity against the shipped parser on all 38
+quarters. The shipped parser was also silently dropping 7,678 filings. Both
+parsers lose the same 3.04% of holdings rows and agree exactly on the loss, so
+the hashes match — and the match says nothing about whether either output is
+correct. A byte-identical reproduction of a bug is still a bug.
+
+This is a property of the method, not a defect in it. `canonical_hash.py`,
+canonical dumps, per-column sums, row-count assertions: every one of them
+answers *"did this change alter behaviour?"* and none of them answers *"was the
+behaviour right?"* The second question needs a test against ground truth — here,
+the observation that a 13F-HR with a populated information table must not parse
+to zero holdings.
+
+Worth internalising because the failure is invisible in exactly the way the
+identity test is: a filing that yields zero rows looks identical, downstream, to
+an institution that did not file. No orphan, no row-count mismatch, no universe
+check catches it.
+
+## Byte-identity method
+
+Parquet and sas7bdat embed timestamps, so file bytes are the wrong test. This
+leg emits gzipped TSV, and gzip embeds nothing that varies here, but the
+**row order is genuinely non-deterministic** regardless: worker goroutines push
+to the writer in completion order, so two runs of unmodified code produce
+different row orders. Canonical-dump equality is therefore the only meaningful
+test, exactly as for the parquet legs.
+
+For each quarter: `gzip -dc | LC_ALL=C sort | sha256sum`, plus row count,
+manifest row count, per-column sums for all five numeric columns
+(`value`, `shares`, `voting_sole`, `voting_shared`, `voting_none`), the
+`cusip_valid` count, the `parse_mode` histogram and the `parse_status`
+histogram — so a mismatch localises to a column instead of a hex string.
+
+There are no floats anywhere in this output. Every numeric column is written by
+`strconv.FormatInt`, so the fixed-precision rendering that the parquet legs need
+is not a concern here; integers are exact.
+
+**Result — all 38 quarters, 86,444,026 holdings rows, 248,500 manifest rows:**
+
+```
+IDENTITY: PASS — every quarter's canonical digest identical
+  shipped parser (run A)  sha256(all 38 digests) = 671ef9d298a22d815b3048b012610982d8be7d45468afdfa4c7a2338d1df939a
+  optimised parser (run B) sha256(all 38 digests) = 671ef9d298a22d815b3048b012610982d8be7d45468afdfa4c7a2338d1df939a
+```
+
+Three further checks:
+
+- **The shared `canonical_hash.py`** (the primitive the other pipeline legs use)
+  agrees, reached independently through parquet rather than sorted text:
+
+  ```
+  A.parquet  rows 2,692,060 x 23  sha256 c1a62dccf1e0779208b16bbfe150a35b7dae3563ca17cca7cef49ac6ff9c4565
+  B.parquet  rows 2,692,060 x 23  sha256 c1a62dccf1e0779208b16bbfe150a35b7dae3563ca17cca7cef49ac6ff9c4565
+  IDENTICAL (canonical sort + 12 sig digits)
+  ```
+
+
+- **Differential harness.** `parse_13f_go -verify-fast-xml` parses every filing
+  *both ways* and compares row structs field by field. Over 2016Q4 and 2024Q2
+  (12,622 filings): **0 mismatches**.
+- **Frozen pre-change baseline.** Three quarters were hashed before any code was
+  written; those digests match run A exactly, confirming the canonical dump is
+  stable across runs despite the non-deterministic row order.
+- **The committed binary is the benchmarked one.** The shipped
+  `parse_13f_go` is built `-trimpath -ldflags=-s`, which the benchmark binary
+  was not, so it was re-checked rather than assumed: 500 filings, 702,339 rows,
+  identical holdings and manifest digests.
+
+### Shard shape does not affect output
+
+Run C (230 byte-balanced shards) hashes identically to run A (38 quarter shards)
+on all 38 quarters. Regrouping which filings land in which output file changes
+nothing, as it should: the parser holds no cross-file state.
 
 ## What a canonical-hash identity test does not prove
 
@@ -364,8 +450,14 @@ recorded so the change is auditable in either direction:
 
 | Baseline | Canonical digest over 38 quarters | Rows |
 |---|---|---:|
-| Pre-fix (runs A and B) | `671ef9d298a22d815b3048b012610982d8be7d45468afdfa4c7a2338d1df939a` | 86,444,026 |
-| Post-fix (run E) | see `hashes/runE_fixed/` | 89,072,489 |
+| Pre-fix (runs A, B, C) | `671ef9d298a22d815b3048b012610982d8be7d45468afdfa4c7a2338d1df939a` | 86,444,026 |
+| Post-fix (run E) | `d5cfd2ad2d55dbde740945297bb76c038585ebf1aa80912ab1fde38bd4e769c8` | 89,072,489 |
+
+**All 38 quarters changed** — no quarter was clean. Manifest rows are unchanged
+at 248,500, confirming the fix adds holdings to filings already being processed
+rather than pulling in new filings. The full-run delta of +2,628,463 rows matches
+the targeted re-parse of the 7,678 affected filings exactly, so the fix touched
+those filings and nothing else.
 
 The optimisation and the correctness fix are separate commits for exactly this
 reason: the first must not change a byte, the second must.

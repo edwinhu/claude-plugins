@@ -3,8 +3,8 @@
 Parses `13F-HR` / `13F-HR/A` filings straight out of `/wrds/sec/archives` into
 gzipped TSV: one row per holding, plus a manifest row per filing.
 
-Measured end to end on 2026-07-25: **248,500 filings, 45.31 GB, 86,444,026
-holdings rows, 2 min 32 s wall** across 38 quarters (2016Q4–2026Q1).
+Measured end to end on 2026-07-25: **248,500 filings, 45.31 GB, 89,072,489
+holdings rows, ~2.5 min wall** across 38 quarters (2016Q4–2026Q1).
 Full numbers, method and grid limits: [`references/13f-scrape-performance.md`](../../references/13f-scrape-performance.md).
 
 ## Layout
