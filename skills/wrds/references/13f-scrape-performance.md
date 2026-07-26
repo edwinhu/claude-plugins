@@ -12,7 +12,8 @@ Everything here was measured on wrds-cloud on 2026-07-25 against
 - [Where the CPU went](#where-the-cpu-went) — encoding/xml was 63%
 - [Array design](#array-design) — shard on bytes, one slot per task
 - [Byte-identity method](#byte-identity-method)
-- [Open defect: filings declared windows-1252 parse to zero rows](#open-defect-filings-declared-windows-1252-parse-to-zero-rows)
+- [What identity testing does not prove](#what-a-canonical-hash-identity-test-does-not-prove)
+- [Fixed: filings declared windows-1252 parsed to zero rows](#fixed-filings-declared-windows-1252-parsed-to-zero-rows) — 7,023 filings, 2.6M rows, +3.84% of value
 
 ## The scheduler is the constraint
 
@@ -182,6 +183,28 @@ dispatch gaps. Coarser shards waste less on dispatch but leave a longer tail.
 > concurrent job, so the tail-versus-dispatch trade is reasoned, not measured.
 > 200 MB is a working choice that measured well, not a tuned one.
 
+## What a canonical-hash identity test does not prove
+
+**It proves a refactor was faithful. It cannot prove the behaviour was right.**
+
+The optimisation below passes identity against the shipped parser on all 38
+quarters. The shipped parser was also silently dropping 7,678 filings. Both
+parsers lose the same 3.04% of holdings rows and agree exactly on the loss, so
+the hashes match — and the match says nothing about whether either output is
+correct. A byte-identical reproduction of a bug is still a bug.
+
+This is a property of the method, not a defect in it. `canonical_hash.py`,
+canonical dumps, per-column sums, row-count assertions: every one of them
+answers *"did this change alter behaviour?"* and none of them answers *"was the
+behaviour right?"* The second question needs a test against ground truth — here,
+the observation that a 13F-HR with a populated information table must not parse
+to zero holdings.
+
+Worth internalising because the failure is invisible in exactly the way the
+identity test is: a filing that yields zero rows looks identical, downstream, to
+an institution that did not file. No orphan, no row-count mismatch, no universe
+check catches it.
+
 ## Byte-identity method
 
 Parquet and sas7bdat embed timestamps, so file bytes are the wrong test. This
@@ -247,27 +270,102 @@ qrls <jobid>                                  # release the held hashing array
 cat hashes/runC_*/*.hash | sort > /tmp/C.all  # then diff against /tmp/A.all
 ```
 
-## Open defect: filings declared windows-1252 parse to zero rows
+## Fixed: filings declared windows-1252 parsed to zero rows
 
-Found while building the differential harness; **not fixed**, because fixing it
-would change output and byte-identity was the requirement.
+Found while building the differential harness, then fixed. This mattered more
+than the speedup.
+
+### The failure
 
 `encoding/xml` refuses any document whose declaration names a non-UTF-8 encoding
-when `Decoder.CharsetReader` is nil. `parseInfoTable` breaks out of its token
-loop on that error and returns **zero rows with no error surfaced** — the filing
-lands in the manifest as `parse_status=ok`, `parse_mode=xml`, `n_rows=0`.
+when `Decoder.CharsetReader` is nil. It failed on the first token,
+`parseInfoTable` broke out of its loop, and the filing returned **zero holdings
+rows while still recording `parse_status=ok`, `parse_mode=xml`, `n_rows=0`** in
+the manifest. Ordinary 13F-HRs with populated tables, whose only distinguishing
+feature was `<?xml version="1.0" encoding="windows-1252"?>`.
 
-These are ordinary 13F-HR filings with real holdings tables whose only sin is
-`<?xml version="1.0" encoding="windows-1252"?>`. Measured scope: 382 of 8,114
-filings in 2024Q2 (**4.7%**) and 115 of 4,508 in 2016Q4 (**2.6%**).
+A filing that parses to zero rows is an institution vanishing from ownership for
+that quarter, and it is invisible downstream: a missing institution looks exactly
+like an institution that did not file.
 
-Detection query against the manifest:
+### Blast radius, measured
 
-```bash
-gzip -dc *.manifest.tsv.gz | awk -F'\t' '$9=="xml" && $10=="ok" && $8==0'
+Re-parsed the exact set of filings that produced zero rows under the shipped
+parser (7,678 of 248,500, extracted from the run A manifests):
+
+| | |
+|---|---|
+| Filings recovered | **7,023** (2.83% of the corpus) |
+| Holdings rows recovered | **2,628,463** — +3.04% on 86,444,026 |
+| Reported value recovered | **$25.74tn of $670.71tn — +3.84%** (summed over quarter-filings, not point-in-time AUM) |
+| Distinct institutions affected | **768** |
+| Still zero after the fix | 655 — genuinely empty tables, no charset error remained |
+
+No filing hit a charset we cannot decode: windows-1252 and ISO-8859-1 covered
+the entire affected set.
+
+**Who.** Overwhelmingly large foreign banks and asset managers plus public
+pensions — Royal Bank of Canada ($6.7tn over the span, 402,830 rows), Barclays,
+CalPERS, DZ Bank, Schroder, Nomura, Caisse de Dépôt, Two Sigma, Farallon,
+MetLife, Saudi PIF. Consistent with filing agents serving clients whose names
+carry accented characters.
+
+**Does it touch the index block? No — and that makes it worse, not better.**
+Zero matches for BlackRock, Vanguard, State Street, Geode, Northern Trust,
+Fidelity/FMR, Dimensional, Invesco or Schwab: the index managers were never
+affected. So the loss fell entirely on the *non-index* side of institutional
+ownership, which means it **shrank the denominator and inflated `index_pct` and
+`passive_pct`** rather than adding noise to them.
+
+**And the bias is time-varying, which is the dangerous part.** Recovered filings
+per quarter run ~85–130 through 2023Q2, then jump to 213 in 2023Q3 and hold near
+400 thereafter:
+
+```
+2016Q4  108   2019Q4  107   2022Q4   80   2025Q1  403
+2018Q4  118   2020Q4   97   2023Q2   85   2025Q2  447
+2019Q2  120   2021Q4   78   2023Q3  213   2025Q4  402
+2019Q3  116   2022Q2   89   2023Q4  416   2026Q1  378
 ```
 
-Fixing it means installing a `CharsetReader` for windows-1252 (a 32-entry table
-for 0x80–0x9F; the rest is Latin-1). That is a small change but a **semantic**
-one — it adds holdings rows — so it belongs in its own commit with its own
-before/after row-count delta, not smuggled into a performance change.
+Distinct affected filers go from 157 pre-2023Q3 to 519 after. The break is a
+filing-agent effect, not a filer one: agents `0001140361` (1,139 filings),
+`0000905148` (501), `0000945621` (209) and others show `pre=0, post=N` — they
+switched to emitting windows-1252 declarations partway through 2023.
+
+A step change in dropped non-index ownership at 2023Q3 masquerades as a **rise in
+passive ownership share** from 2023Q3 onward. That is a trend, in the outcome
+variable, created by a parser bug.
+
+### The fix
+
+`charset.go` transcodes windows-1252 and ISO-8859-1 filing XML to UTF-8 and drops
+the now-inaccurate declaration before either parser sees the bytes. Both are
+single-byte tables, so it needs no dependency. It is applied to the information
+table and to `primary_doc.xml` — the latter matters because a rejected primary
+doc silently loses `isAmendment`, `amendmentType` and `reportType`, so an
+amendment stops being flagged and a notice stops being recognised.
+
+A charset we cannot decode now returns an **error** instead of an empty table, so
+the silent case cannot recur:
+
+```
+parse_status=error  error_msg=information table declares unsupported encoding "..."
+```
+
+`-decode-charset=false` reproduces the pre-fix output exactly; that is how the
+recovery delta above was measured.
+
+### Identity after the fix — expected to break, and it does
+
+The post-fix output is **deliberately not** identical to the frozen baseline. It
+is the same output plus 2,628,463 rows across 7,023 filings. Both digests are
+recorded so the change is auditable in either direction:
+
+| Baseline | Canonical digest over 38 quarters | Rows |
+|---|---|---:|
+| Pre-fix (runs A and B) | `671ef9d298a22d815b3048b012610982d8be7d45468afdfa4c7a2338d1df939a` | 86,444,026 |
+| Post-fix (run E) | see `hashes/runE_fixed/` | 89,072,489 |
+
+The optimisation and the correctness fix are separate commits for exactly this
+reason: the first must not change a byte, the second must.

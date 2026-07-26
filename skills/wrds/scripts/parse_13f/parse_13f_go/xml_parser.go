@@ -93,6 +93,14 @@ func extractPrimaryDoc(buf []byte) primaryDocInfo {
 	}
 	xmlContent := docBlock[xmlStart+len("<XML>") : xmlEnd]
 
+	// Same charset trap as the information table. Here the casualty is quieter
+	// but not harmless: a rejected primary_doc loses isAmendment,
+	// amendmentType and reportType, so an amendment stops being flagged as one
+	// and a 13F notice stops being recognised as a notice.
+	if decodeCharset {
+		xmlContent, _, _ = normalizeCharset(xmlContent)
+	}
+
 	// Parse the primary_doc XML — we only need a few fields.
 	decoder := xml.NewDecoder(bytes.NewReader(xmlContent))
 	decoder.Strict = false
@@ -177,6 +185,20 @@ func parseXML(buf []byte, filePath string) (*ParseResult, error) {
 		return nil, fmt.Errorf("no <XML>...</XML> content in information table document")
 	}
 
+	// Decode a legacy-encoded table before parsing. Without this, a
+	// windows-1252 declaration makes encoding/xml fail on its first token and
+	// the filing silently reports zero holdings — see charset.go.
+	if decodeCharset {
+		var charsetOK bool
+		xmlContent, _, charsetOK = normalizeCharset(xmlContent)
+		if !charsetOK {
+			// A charset we cannot decode still loses the holdings, but it must
+			// not look like a filing that simply held nothing.
+			label, _, _, _ := declaredEncoding(xmlContent)
+			return nil, fmt.Errorf("information table declares unsupported encoding %q", label)
+		}
+	}
+
 	// Parse the information table entries.
 	rows, err := parseInfoTable(xmlContent, filePath, meta, pdi)
 	if err != nil {
@@ -246,9 +268,14 @@ func extractXMLContent(doc []byte) []byte {
 // verifyFast additionally runs the encoding/xml path on every filing the
 // scanner accepted and reports any divergence — the equivalence harness, not
 // something to leave on in production.
+// decodeCharset transcodes legacy-encoded filing XML to UTF-8 instead of
+// letting encoding/xml reject it and drop the holdings. Setting it false
+// reproduces the pre-fix output exactly, which is how the recovery delta was
+// measured; it is not a mode anyone should run in production.
 var (
-	fastXML    = true
-	verifyFast = false
+	fastXML       = true
+	verifyFast    = false
+	decodeCharset = true
 )
 
 // parseInfoTable parses infoTable elements from the XML content.

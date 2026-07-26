@@ -50,6 +50,44 @@ Output lands in `$ROOT/out/<quarter>_<nn>.tsv.gz` plus matching
 `.manifest.tsv.gz`. Shards are built within quarter, so a quarter's holdings are
 `cat`-able from its shards in any order.
 
+## The XML library was two thirds of the cost
+
+Worth knowing before you try to tune anything else. `runtime/pprof` over a full
+quarter (2024Q2, `GOMAXPROCS=4`, 104.06 s of samples):
+
+| Component | Share of CPU |
+|---|---:|
+| `encoding/xml.(*Decoder).Token` | **63.4%** — ~31 pp of it in `nsname`/`name`/`readName`/`isName`, i.e. namespace-name validation |
+| `compress/flate` (the single gzip writer goroutine) | **9.2%** — exactly the serial fraction Amdahl predicted from the slot-scaling curve |
+| GC | ~6.2% |
+
+Nothing about the *parsing logic* was slow. The general-purpose XML parser was.
+Replacing it for the information table — which is machine-generated,
+attribute-free and entity-simple — is where the 2.8x came from. If you are
+looking for more speed, that profile is the map; do not start by micro-tuning
+the regexes.
+
+## Two things about correctness
+
+**A canonical-hash identity test proves a refactor was faithful, not that the
+behaviour was right.** The optimisation here passed identity against the old
+parser on all 38 quarters while both were silently dropping 3% of holdings. The
+hashes matched *because* both were wrong in the same way. Identity answers "did
+this change alter behaviour?"; it cannot answer "was the behaviour correct?"
+
+**A filing that parses to zero rows is invisible.** It looks exactly like an
+institution that did not file — no orphan, no row-count mismatch, nothing a
+universe check can catch. Assert on it directly:
+
+```bash
+gzip -dc out/*.manifest.tsv.gz | awk -F'\t' '$9=="xml" && $10=="ok" && $8==0'
+```
+
+That query is how the windows-1252 defect was found: **7,023 filings and
+2,628,463 holdings rows** (+3.04% rows, +3.84% of reported value, 768
+institutions) were being dropped. Fixed in `charset.go`; an undecodable charset
+now returns `parse_status=error` rather than an empty table.
+
 ## Things that will bite you
 
 - **Ten slots, total, per user in `all.q`.** Not ten tasks — ten slots, shared
@@ -63,12 +101,10 @@ Output lands in `$ROOT/out/<quarter>_<nn>.tsv.gz` plus matching
   outputs with a canonical (sorted) dump, never with file bytes — see the
   identity section of the performance reference.
 - **`fsize` on `wrds_forms` lies for recent filings.** That is why step 2 exists.
-- **Filings declared `windows-1252` currently yield zero holdings rows** — a real
-  open defect, ~4.7% of a recent quarter, documented in the performance
-  reference. Detect with:
-  ```bash
-  gzip -dc out/*.manifest.tsv.gz | awk -F'\t' '$9=="xml" && $10=="ok" && $8==0'
-  ```
+- **Legacy-encoded filings were dropped until v0.2.1.** If you have output from
+  an earlier build, it is missing ~3% of holdings — regenerate it. The count of
+  affected filings jumped ~5x in 2023Q3 when several filing agents switched to
+  emitting windows-1252, so the loss is time-varying, not a constant offset.
 
 ## Rebuilding the parser
 

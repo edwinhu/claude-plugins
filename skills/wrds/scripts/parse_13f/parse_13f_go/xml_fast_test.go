@@ -242,9 +242,9 @@ func TestLocalName(t *testing.T) {
 	}{
 		{"infoTable", "infoTable", true},
 		{"n1:infoTable", "infoTable", true},
-		{":infoTable", ":infoTable", true},  // leading colon: encoding/xml keeps it whole
-		{"infoTable:", "infoTable:", true},  // trailing colon: likewise
-		{"a:b:c", "", false},                // encoding/xml treats this as a syntax error
+		{":infoTable", ":infoTable", true}, // leading colon: encoding/xml keeps it whole
+		{"infoTable:", "infoTable:", true}, // trailing colon: likewise
+		{"a:b:c", "", false},               // encoding/xml treats this as a syntax error
 	}
 	for _, c := range cases {
 		got, ok := localName([]byte(c.in))

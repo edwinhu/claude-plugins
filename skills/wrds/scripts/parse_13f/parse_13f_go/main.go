@@ -23,7 +23,7 @@ import (
 	"sync"
 )
 
-const version = "parse_13f_go v0.2.0"
+const version = "parse_13f_go v0.2.1"
 
 // ---------------------------------------------------------------------------
 // TSV serialization
@@ -191,12 +191,12 @@ func openOutput(path string) (*os.File, io.Writer, func(), error) {
 
 func main() {
 	var (
-		filesFrom   string
-		archiveRoot string
-		outFile     string
+		filesFrom    string
+		archiveRoot  string
+		outFile      string
 		manifestFile string
-		concurrency int
-		showVersion bool
+		concurrency  int
+		showVersion  bool
 	)
 
 	flag.StringVar(&filesFrom, "files-from", "", "filelist, one path per line (required)")
@@ -208,6 +208,8 @@ func main() {
 	flag.BoolVar(&fastXML, "fast-xml", true, "use the hand-rolled information-table scanner")
 	flag.BoolVar(&verifyFast, "verify-fast-xml", false,
 		"cross-check every fast-scanned filing against encoding/xml (slow; equivalence harness)")
+	flag.BoolVar(&decodeCharset, "decode-charset", true,
+		"transcode windows-1252/latin-1 filing XML to UTF-8 (false reproduces the pre-fix drop)")
 	flag.Parse()
 
 	if showVersion {
