@@ -38,8 +38,11 @@ __all__ = [
     "detect_split_factor_ratio",
     "detect_unit_discontinuity",
     "detect_coverage_end",
+    "detect_coverage_step",
     "detect_owner_dropout",
     "detect_zero_row_cohort",
+    "detect_bridge_rate_regression",
+    "detect_duplicate_grain",
     "COMMON_SPLIT_FACTORS",
 ]
 
@@ -539,6 +542,209 @@ def detect_zero_row_cohort(
             )
         )
     return findings
+
+
+def detect_coverage_step(
+    records: Sequence[dict],
+    *,
+    period_col: str = "rdate",
+    count_cols: Sequence[str] = ("n_funds", "n_cusips", "n_rows"),
+    step_threshold: float = 0.50,
+) -> list[Finding]:
+    """A step change in how much the feed *covers*, in counts rather than values.
+
+    Distinct from `detect_unit_discontinuity`, which watches a value column. Here the
+    counts themselves jump, which is what a feed migration looks like: nothing is
+    rescaled, there is simply more (or less) of it.
+
+    The S12 legacy-SP -> strategic-collection switch at 2017Q4 is the reference case:
+    CUSIPs in fund holdings **+613%**, unique funds **+113%**, fund-CUSIP observations
+    +265%. WRDS confirms this is a genuine coverage expansion, not corruption -- overseas
+    holdings, ADRs and preferreds finally received CUSIPs. It is still fatal to any
+    level comparison spanning the boundary, and it is invisible in per-firm statistics.
+
+    Fires in both directions on purpose: the same detector catches the 2019Q3-Q4 S34
+    outage (a step *down*) and the 2017Q4 S12 expansion (a step *up*).
+
+    Expects one record per period holding the counts -- i.e. an already-aggregated
+    coverage summary, not the raw holdings panel.
+    """
+    by_period: dict[_dt.date, dict] = {}
+    for rec in records:
+        by_period[_as_date(rec[period_col])] = rec
+
+    findings: list[Finding] = []
+    periods = sorted(by_period)
+    for prev_p, cur_p in zip(periods, periods[1:]):
+        for col in count_cols:
+            prev_v, cur_v = by_period[prev_p].get(col), by_period[cur_p].get(col)
+            if prev_v in (None, 0) or cur_v is None:
+                continue
+            change = _pct_change(cur_v, prev_v)
+            if change is None or abs(change) < step_threshold:
+                continue
+            findings.append(
+                Finding(
+                    kind="coverage_step",
+                    entity=col,
+                    period=cur_p,
+                    detail=(
+                        f"{col} stepped {change:+.0%} ({prev_v:,} -> {cur_v:,}) at "
+                        f"{cur_p} -- feed composition changed; level comparisons "
+                        f"spanning this boundary are invalid"
+                    ),
+                    metrics={
+                        "pct_change": change,
+                        "prev": prev_v,
+                        "cur": cur_v,
+                        "direction": "expansion" if change > 0 else "contraction",
+                        "prev_period": prev_p,
+                    },
+                )
+            )
+    return findings
+
+
+def detect_bridge_rate_regression(
+    records: Sequence[dict],
+    *,
+    period_col: str = "rdate",
+    linked_col: str = "n_linked",
+    total_col: str = "n_total",
+    min_rate: float = 0.70,
+    max_drop: float = 0.10,
+) -> list[Finding]:
+    """An identifier bridge that silently stops matching.
+
+    A join that quietly drops rows is the most under-tested failure in this file: the
+    result still looks like a panel, just a smaller one, and nothing raises.
+
+    MFLINKS is the reference case. It was **not backfilled** for the 2017Q4-2020Q2 S12
+    feed change, so `wficn` coverage regresses precisely where the feed expanded -- and
+    the measured bridge rate falls from ~77% pre-2017 to ~58-66% after. WRDS's own advice
+    for that window is to identify US equity funds through Factset or CRSP instead.
+
+    Flags two things: an absolute rate below `min_rate`, and a quarter-over-quarter drop
+    exceeding `max_drop` (which catches a cliff that starts above the floor).
+    """
+    by_period: dict[_dt.date, dict] = {}
+    for rec in records:
+        by_period[_as_date(rec[period_col])] = rec
+
+    rates: dict[_dt.date, float] = {}
+    for period, rec in by_period.items():
+        total = rec.get(total_col)
+        linked = rec.get(linked_col)
+        if not total or linked is None:
+            continue
+        rates[period] = linked / total
+
+    findings: list[Finding] = []
+    for period in sorted(rates):
+        rate = rates[period]
+        if rate < min_rate:
+            findings.append(
+                Finding(
+                    kind="bridge_rate_low",
+                    entity=linked_col,
+                    period=period,
+                    detail=(
+                        f"only {rate:.1%} of rows bridged at {period} "
+                        f"(floor {min_rate:.0%}) -- unbridged rows vanish silently"
+                    ),
+                    metrics={"rate": rate, "floor": min_rate},
+                )
+            )
+    ordered = sorted(rates)
+    for prev_p, cur_p in zip(ordered, ordered[1:]):
+        drop = rates[prev_p] - rates[cur_p]
+        if drop > max_drop:
+            findings.append(
+                Finding(
+                    kind="bridge_rate_regression",
+                    entity=linked_col,
+                    period=cur_p,
+                    detail=(
+                        f"bridge rate fell {rates[prev_p]:.1%} -> {rates[cur_p]:.1%} "
+                        f"at {cur_p} ({drop:.1%} drop) -- the link table did not grow "
+                        f"with the feed"
+                    ),
+                    metrics={
+                        "rate_prev": rates[prev_p],
+                        "rate_cur": rates[cur_p],
+                        "drop": drop,
+                        "prev_period": prev_p,
+                    },
+                )
+            )
+    return findings
+
+
+def detect_duplicate_grain(
+    records: Sequence[dict],
+    *,
+    grain: Sequence[str],
+    value_col: str | None = None,
+    max_duplicate_rate: float = 0.0,
+) -> list[Finding]:
+    """Records that repeat at the grain they are supposed to be unique on.
+
+    Duplicates inflate every sum downstream and are invisible in a spot check. Two
+    documented cases in this data:
+
+    - The 2014 S12 blip -- mutual-fund ownership 29% -> 35% -> 30% -- which WRDS
+      attributes to funds being listed twice.
+    - The `fundno`-vs-`wficn` dedup bug, which inflated MF_TOTAL by **~3.95x** because
+      one `wficn` maps to a mean ~3.5 `crsp_fundno` share classes. Dedup on the wrong
+      key and you multiply the panel.
+
+    Pass the grain you believe is unique -- e.g. `("wficn", "rdate", "cusip8")`. With
+    `value_col`, also reports the inflation the duplicates cause, which is the number
+    that actually matters: a duplicate carrying the same value doubles your total.
+    """
+    seen: dict[tuple, list[dict]] = {}
+    for rec in records:
+        key = tuple(rec.get(col) for col in grain)
+        seen.setdefault(key, []).append(rec)
+
+    dupes = {k: v for k, v in seen.items() if len(v) > 1}
+    if not dupes:
+        return []
+    rate = len(dupes) / len(seen)
+    if rate <= max_duplicate_rate:
+        return []
+
+    metrics: dict[str, Any] = {
+        "duplicate_key_rate": rate,
+        "n_duplicate_keys": len(dupes),
+        "n_keys": len(seen),
+        "n_excess_rows": sum(len(v) - 1 for v in dupes.values()),
+        "worst_key": max(dupes, key=lambda k: len(dupes[k])),
+        "max_multiplicity": max(len(v) for v in dupes.values()),
+    }
+    detail = (
+        f"{len(dupes):,} of {len(seen):,} keys duplicated on "
+        f"{'+'.join(grain)} ({rate:.1%}); {metrics['n_excess_rows']:,} excess rows"
+    )
+    if value_col is not None:
+        total = sum(
+            float(r[value_col]) for v in seen.values() for r in v if r.get(value_col) is not None
+        )
+        deduped = sum(
+            float(v[0][value_col]) for v in seen.values() if v[0].get(value_col) is not None
+        )
+        if deduped:
+            metrics["inflation_factor"] = total / deduped
+            detail += f" -- inflates {value_col} by {total / deduped:.2f}x"
+    return [
+        Finding(
+            kind="duplicate_grain",
+            entity="+".join(grain),
+            period=None,
+            detail=detail,
+            metrics=metrics,
+        )
+    ]
 
 
 def from_dataframe(df: Any, detector: Callable[..., list[Finding]], **kwargs: Any):

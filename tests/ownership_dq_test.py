@@ -248,6 +248,136 @@ check(
     str(end_finding.metrics["last_period"]),
 )
 
+# ---- S12 splits. The splits note's worked examples are ALL mutual-fund data, and MF
+# outlier rates around large splits are WORSE than 13F (40.7% vs 34.5% above 4:1).
+# "S12 looks healthier" was measured on one firm with no split-quarter test; the note
+# tests a dimension we had not. So S12 gets the same split detector, not a lighter one.
+s12_split = [
+    {"permno": 14593, "rdate": dt.date(2014, 3, 31), "mf_total": 8.0e7, "numowners": 410},
+    {"permno": 14593, "rdate": dt.date(2014, 6, 30), "mf_total": 5.6e8, "numowners": 412},
+]
+check(
+    "applies the split detector to S12, not just S34",
+    len(dq.detect_split_factor_ratio(s12_split, shares_col="mf_total")) == 1,
+)
+
+# ---- S12 2017Q4 feed change: counts step, values do not. A different detector.
+print("\nF3: S12 feed-change / coverage-step detector")
+
+# Measured by WRDS: CUSIPs +613%, unique funds +113% at 2017Q4.
+s12_coverage = [
+    {"rdate": dt.date(2017, 6, 30), "n_funds": 25_000, "n_cusips": 60_000},
+    {"rdate": dt.date(2017, 9, 30), "n_funds": 25_400, "n_cusips": 61_000},
+    {"rdate": dt.date(2017, 12, 31), "n_funds": 54_100, "n_cusips": 435_000},
+    {"rdate": dt.date(2018, 3, 31), "n_funds": 55_000, "n_cusips": 440_000},
+]
+steps = dq.detect_coverage_step(s12_coverage)
+check("fires on the 2017Q4 feed change", len(steps) == 2, f"got {len(steps)}")
+check(
+    "dates the step to 2017Q4",
+    steps and all(s.period == dt.date(2017, 12, 31) for s in steps),
+)
+check(
+    "labels it an expansion, not a loss",
+    steps and all(s.metrics["direction"] == "expansion" for s in steps),
+)
+check(
+    "reports the CUSIP step near the documented +613%",
+    any(
+        s.entity == "n_cusips" and 6.0 <= s.metrics["pct_change"] <= 6.5 for s in steps
+    ),
+)
+check(
+    "silent on smooth quarter-to-quarter coverage growth",
+    dq.detect_coverage_step(
+        [{"rdate": q, "n_funds": int(25_000 * 1.03**i)} for i, q in enumerate(quarters(2012, 8))]
+    )
+    == [],
+)
+# Same detector must catch a step DOWN -- the 2019Q3-Q4 S34 outage.
+check(
+    "also catches a coverage contraction",
+    [
+        f.metrics["direction"]
+        for f in dq.detect_coverage_step(
+            [
+                {"rdate": dt.date(2019, 6, 30), "n_funds": 3500},
+                {"rdate": dt.date(2019, 9, 30), "n_funds": 900},
+            ]
+        )
+    ]
+    == ["contraction"],
+)
+
+# ---- MFLINKS bridge regression across the same boundary.
+print("\nF3: MFLINKS bridge-rate detector")
+
+# Measured: ~77% pre-2017 -> ~58-66% after, because MFLINKS was not backfilled.
+bridge = [
+    {"rdate": dt.date(2016, 12, 31), "n_linked": 7700, "n_total": 10_000},
+    {"rdate": dt.date(2017, 6, 30), "n_linked": 7690, "n_total": 10_000},
+    {"rdate": dt.date(2017, 12, 31), "n_linked": 11_500, "n_total": 19_500},
+    {"rdate": dt.date(2018, 6, 30), "n_linked": 11_600, "n_total": 19_800},
+]
+bridge_hits = dq.detect_bridge_rate_regression(bridge)
+kinds = {f.kind for f in bridge_hits}
+check("fires on the MFLINKS cliff", bridge_hits != [])
+check("reports it as a regression, not just a low level", "bridge_rate_regression" in kinds)
+check(
+    "dates the regression to the 2017Q4 feed change",
+    any(
+        f.kind == "bridge_rate_regression" and f.period == dt.date(2017, 12, 31)
+        for f in bridge_hits
+    ),
+)
+check(
+    "also flags the post-change level against the floor",
+    "bridge_rate_low" in kinds,
+)
+check(
+    "silent on a healthy, stable bridge",
+    dq.detect_bridge_rate_regression(
+        [{"rdate": q, "n_linked": 7700, "n_total": 10_000} for q in quarters(2012, 4)]
+    )
+    == [],
+)
+
+# ---- Duplicate grain: the 2014 double-reporting blip and the wficn/fundno dedup bug.
+print("\nF3: duplicate-grain detector")
+
+clean_holdings = [
+    {"wficn": w, "rdate": dt.date(2014, 6, 30), "cusip8": "03783310", "shares": 1000.0}
+    for w in range(500)
+]
+check(
+    "silent when the grain is genuinely unique",
+    dq.detect_duplicate_grain(clean_holdings, grain=("wficn", "rdate", "cusip8")) == [],
+)
+
+# One wficn -> mean ~3.5 crsp_fundno share classes. Dedup on the wrong key and the
+# panel multiplies -- the documented ~3.95x MF_TOTAL inflation.
+share_class_dupes = [
+    dict(r, crsp_fundno=r["wficn"] * 10 + k)
+    for r in clean_holdings
+    for k in range(4)
+]
+dupe_hits = dq.detect_duplicate_grain(
+    share_class_dupes, grain=("wficn", "rdate", "cusip8"), value_col="shares"
+)
+check("catches share-class duplication at the wficn grain", len(dupe_hits) == 1)
+check(
+    "quantifies the inflation at ~4x, matching the measured 3.95x",
+    dupe_hits and 3.9 <= dupe_hits[0].metrics["inflation_factor"] <= 4.1,
+    str(dupe_hits[0].metrics.get("inflation_factor")) if dupe_hits else "",
+)
+check(
+    "the same rows are clean at the share-class grain",
+    dq.detect_duplicate_grain(
+        share_class_dupes, grain=("wficn", "crsp_fundno", "rdate", "cusip8")
+    )
+    == [],
+)
+
 # ===========================================================================
 # F4. Unit discontinuity in `value` at 2023Q1 -- and its non-uniformity
 # ===========================================================================

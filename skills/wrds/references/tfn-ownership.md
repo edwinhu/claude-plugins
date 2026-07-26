@@ -258,9 +258,19 @@ breaks. Documented failure modes:
 | Adjustment at the wrong date | MasterCard shares adjusted at 2013-12-31, before the 2014-01-21 ex-date | adjust at ex-date |
 | Compounded on carry-forward | stale rows re-adjusted each vintage | adjust once |
 
-Magnitude, from the note: outlier rates in ΔOwnership around split quarters run
-**13.8% at Qtr(0) and 14.1% at Qtr(−1) for 13Fs** against a 5% null — and scale with
-split size: **32.4% at split factor 4, 34.5% above 4**. The note's own tests rule out the
+**This is primarily an S12 finding.** Every worked example in the note is drawn from
+mutual-fund data — "These cases are selected from Mutual Fund data, though the 13F data
+demonstrate similar patterns" — and funds fare *worse* than 13Fs at large splits:
+
+| Split factor | Mutual funds | 13F |
+|---|---|---|
+| 2 | 12.2% | 13.3% |
+| 3 | 15.2% | 14.8% |
+| 4 | 35.1% | 32.4% |
+| >4 | **40.7%** | 34.5% |
+
+Around split quarters generally, outlier rates run **13.8% at Qtr(0) and 14.1% at Qtr(−1)
+for 13Fs** (12.9% / 11.5% for funds) against a 5% null. The note's own tests rule out the
 obvious explanations: restricting to `rdate == fdate` (no carry-forwards) does *not*
 help, and neither does restricting to splits whose ex-date and record date share a
 quarter.
@@ -351,6 +361,22 @@ Factset or CRSP to identify US equity funds over that window.
 
 This corroborates the measured MFLINKS bridge-rate cliff (§Common Gotchas #12: ~77%
 pre-2017 → ~58–66% after).
+
+→ Detectors: `detect_coverage_step` (counts step while values do not — the signature of a
+feed migration, and it fires in both directions so it also catches the 2019Q3–Q4 S34
+contraction) and `detect_bridge_rate_regression` (a join that quietly stops matching).
+
+### D5b. S12 duplicate reporting
+
+The June 2018 note attributes the 2014 mutual-fund ownership blip (29% → 35% → 30%) to
+funds being **listed twice**. Separately, `fundno` is frequently a *share-class*
+identifier rather than a fund: one `wficn` maps to a mean ~3.5 `crsp_fundno`, so
+deduplicating on the wrong key inflates `MF_TOTAL` by **~3.95×** (§Common Gotchas #6).
+Both are the same class of defect — a grain that is not unique where the code assumes it
+is — and neither is visible in a spot check.
+
+→ Detector: `detect_duplicate_grain`, which reports the resulting inflation factor rather
+than just a duplicate count.
 
 ### D6. 13F `value` units change at 2023Q1 — measured, NOT documented by WRDS
 
