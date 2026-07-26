@@ -58,7 +58,27 @@
         %else %let missing_years = &missing_years. &y.;
     %end;
 
-    %put NOTE: PREREQ mf_own_chunks=&n_mf. npx_cell_years=&n_cells./%eval(&year2. - &year1. + 1);
+    /* S12 partitions get their own check. A refused PG connection in the S12
+     * array leaves a partition missing, which surfaces as an ownership-COLUMN
+     * gap rather than a missing item — so the universe assertion below cannot
+     * see it and neither can the mf_own count if tfn was allowed to full-scan. */
+    %local i r n_s12 want_s12 missing_s12;
+    %let i = 1; %let n_s12 = 0; %let want_s12 = 0; %let missing_s12 = ;
+    %do %while (%scan(&S12_RANGES., &i., %str( )) ne );
+        %let r = %scan(&S12_RANGES., &i., %str( ));
+        %let want_s12 = %eval(&want_s12. + 1);
+        %if %sysfunc(exist(out.s12_%scan(&r.,1,-)_%scan(&r.,2,-)))
+            %then %let n_s12 = %eval(&n_s12. + 1);
+            %else %let missing_s12 = &missing_s12. &r.;
+        %let i = %eval(&i. + 1);
+    %end;
+    %if %length(&missing_s12.) > 0 %then %do;
+        %put ERROR: S12 partition(s) missing:&missing_s12.;
+        %put ERROR- Re-run those tasks: qsub -t <line> -tc 6 -o logs/ -j y run_s12_array.sh;
+        %let missing = &missing. out.s12_[&missing_s12.];
+    %end;
+
+    %put NOTE: PREREQ mf_own_chunks=&n_mf. npx_cell_years=&n_cells./%eval(&year2. - &year1. + 1) s12_partitions=&n_s12./&want_s12.;
 
     %if %length(&missing_years.) > 0 %then %do;
         %put ERROR: N-PX cell dataset(s) missing for year(s):&missing_years.;

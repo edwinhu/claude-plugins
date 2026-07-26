@@ -46,8 +46,22 @@
             keep rdate fdate fundno cusip shares fundname;
         run;
     %end;
+    %else %if not %sysfunc(putc(%superq(S12_ALLOW_FULLSCAN), $1.)) %then %do;
+        /* A missing partition almost always means the S12 array lost a task to a
+         * REFUSED POSTGRESQL CONNECTION (per-role cap is 7). Silently falling back
+         * to a full tfn.s12 scan produces plausible output from a 47.4 GB scan and
+         * hides the fact that a partition is gone — the ownership columns end up
+         * built over a different universe than the one the array intended.
+         * Fail instead. Set S12_ALLOW_FULLSCAN=1 to opt back in deliberately. */
+        %put ERROR: Partition out.&s12_part. not found.;
+        %put ERROR- The S12 array did not produce this range. Do NOT full-scan around it —;
+        %put ERROR- re-run the task: qsub -t <line> -tc 6 -o logs/ -j y run_s12_array.sh;
+        %put ERROR- To override deliberately: %nrstr(%let) S12_ALLOW_FULLSCAN=1;
+        data _null_; abort abend; run;
+    %end;
     %else %do;
-        %put WARNING: Partition out.&s12_part. not found — falling back to full tfn.s12 scan;
+        %put WARNING: Partition out.&s12_part. not found — S12_ALLOW_FULLSCAN set,;
+        %put WARNING- falling back to a full tfn.s12 scan. This reads 47.4 GB.;
         proc sql;
             create table tfn_s12_subset as
                 select a.rdate, a.fdate, a.fundno, a.cusip, a.shares, a.fundname

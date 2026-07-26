@@ -100,9 +100,13 @@ JOB_MFL=$(qsub -terse -N mflinks -o logs/build_mflinks.log -j y \
     run_sas.sh build_mflinks.sas | cut -d. -f1)
 echo "  [1] build_mflinks:   job $JOB_MFL  (~1 min)"
 
-JOB_SPLIT=$(qsub -terse -N split_s12 -o logs/split_s12.log -j y \
-    run_sas.sh split_s12.sas | cut -d. -f1)
-echo "  [1] split_s12:       job $JOB_SPLIT  (~15 min, PG read -> /scratch partitions)"
+# One task per partition, throttled to 6 concurrent: each opens its own
+# PostgreSQL connection and the WRDS per-role cap is 7. Replaces a sequential
+# 9-partition write measured at 910s.
+printf '%s\n' "${YEAR_RANGES[@]}" > s12ranges.txt
+JOB_SPLIT=$(qsub -terse -N s12_split -t "1-${#YEAR_RANGES[@]}" -tc 6 \
+    -o logs/ -j y run_s12_array.sh | cut -d. -f1)
+echo "  [1] s12_split array: job $JOB_SPLIT  (${#YEAR_RANGES[@]} tasks, -tc 6 for the PG cap)"
 
 TFN_JOBS=""
 for range in "${YEAR_RANGES[@]}"; do

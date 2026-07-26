@@ -397,3 +397,89 @@ computed from nothing.
 - [`references/npx-crsp-linking.md`](../../references/npx-crsp-linking.md) — building the crosswalk (the hard half)
 - [`references/iss-voting.md`](../../references/iss-voting.md) — the tables themselves
 - [`references/postgres-vs-sas.md`](../../references/postgres-vs-sas.md) — when to use which engine
+
+---
+
+# Engine choice per leg: native SAS vs PostgreSQL
+
+A leg reads natively when its SAS dataset carries an index, and via PostgreSQL
+when only the PG copy does. Checkable in seconds, and it settles every leg:
+
+```bash
+ls /wrds/<lib>/sasdata/<ds>/*.sas7bndx          # SAS side
+```
+```sql
+SELECT indexname FROM pg_indexes WHERE tablename = '<table>';   -- PG side
+```
+
+| Table | SAS index | Engine | Basis |
+|---|---|---|---|
+| `risk.voteanalysis_npx` | 329 GB + **15 GB** `.sas7bndx` | native | proven: 21 tasks, 839s |
+| `risk.vavoteresults` | 836 MB + **52 MB** | native | SAS copy verified `==` PG |
+| `tfn.s34` | 21.6 GB + **8.0 GB** | native | indexed on `rdate` |
+| `tfn.s12` | 47.4 GB + **19.6 GB** | **see below — measured** | |
+
+## The S12 read path — measured, not inferred
+
+This leg has been argued both ways. The measurements, 2026-07-25:
+
+**`tfn.s12` IS indexed.** Two independent checks:
+
+```
+$ ls -la /wrds/tfn/sasdata/s12/
+-rw-r----- wrdsadmn 47,389,081,600  s12.sas7bdat
+-rw-r----- wrdsadmn 19,589,038,080  s12.sas7bndx     <-- 19.6 GB index
+
+proc contents data=tfn.s12 out2=... ;
+  INDEXES: cusip · fdate · rdate_cusip · rdate_fundno · ticker
+```
+
+`rdate_cusip` and `rdate_fundno` are composite indexes **led by `rdate`**, which
+is the column `split_s12.sas` filters on, and `fdate` is a simple index.
+
+**Nine concurrent native reads do not contend.** One SGE task per partition,
+each `set tfn.s12(where=(rdate between …))`, all nine running together:
+
+| Range | wall | Range | wall | Range | wall |
+|---|---:|---|---:|---|---:|
+| 2003-2010 | 375s | 2019 | 259s | 2022 | 131s |
+| 2011-2016 | 134s | 2020 | 293s | 2023 | 107s |
+| 2017-2018 | 134s | 2021 | 339s | 2024 | 141s |
+
+**Wall = 375s** (all concurrent), against **910s** for the sequential PG path.
+Row counts were **identical to the PG path on all nine partitions**
+(34,212,190 · 27,141,268 · 29,551,018 · 22,369,087 · 23,985,898 · 25,693,786 ·
+26,528,617 · 25,076,427 · 22,936,627), so the universe does not move.
+
+This contradicts the README's original rationale — *"tfn.s12 (44GB SAS file on
+NFS) causes severe I/O contention when read by multiple parallel jobs (~40 min
+each vs ~5 min solo)"*. That incident is real but it is **not reproduced here**,
+and the likely reason is the same one the N-PX leg documents: a `where=` that
+defeats the index full-scans, while an index-friendly `BETWEEN` on date literals
+does not. 375s for nine concurrent readers of a 47.4 GB file is not contention.
+
+**What is still shipped, and why.** The pipeline keeps the PostgreSQL read. The
+native path is measured faster but has **not been identity-tested end to end** —
+row counts matching is necessary, not sufficient, and PG numeric conversion vs a
+native SAS read is exactly the float path most likely to move a weighted
+fraction. Converting it is a live option with a measured 535s upside; it needs a
+canonical-hash comparison against the frozen baseline before it ships.
+
+**The uncontested S12 win, now implemented.** The nine PG extracts were nine
+independent, disjoint, indexed queries executed *sequentially in one job*.
+`run_s12_array.sh` makes them an SGE array. `-tc 6` is load-bearing, not tuning:
+
+```sql
+SELECT rolconnlimit FROM pg_roles WHERE rolname = current_user;   -- 7
+```
+
+Each task opens its own connection, so nine concurrent exceeds the per-role cap.
+A refused connection is not reliably a loud error, so the failure mode is a
+**silently missing partition**. Two guards close that:
+
+- `tfn_holdings_parallel.sas` no longer silently falls back to a full `tfn.s12`
+  scan when its partition is absent — that produced plausible output from a
+  47.4 GB scan and hid the gap. It aborts unless `S12_ALLOW_FULLSCAN=1`.
+- `merge_panel.sas` counts partitions against `S12_RANGES` and aborts on any
+  missing, because a missing partition shows up as an ownership-*column* gap
+  that the item-universe assertion cannot see.

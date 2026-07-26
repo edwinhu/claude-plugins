@@ -97,7 +97,11 @@ def build_fund_units(crsp: pl.DataFrame) -> pl.DataFrame:
         pl.col("series_cik").drop_nulls().first().alias("series_cik"),
         pl.col("end_dt").max().alias("last_end_dt"),
     )
-    return rep.join(agg, on="fund_unit", how="left")
+    # DETERMINISM: polars joins do not guarantee row order, and this frame's
+    # order becomes the TF-IDF target-corpus order via with_row_index below.
+    # A shuffled corpus changes which candidates survive top_n at the threshold
+    # boundary, so the whole ladder moves. Pin it here, once.
+    return rep.join(agg, on="fund_unit", how="left").sort("fund_unit")
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +122,8 @@ def series_to_unit(crsp: pl.DataFrame, units: pl.DataFrame) -> pl.DataFrame:
                 .sort(["series_cik", "tna_unit", "fund_unit"],
                       descending=[False, True, False], nulls_last=True)
                 .unique(subset=["series_cik"], keep="first")
-                .select(pl.col("series_cik").alias("seriesid"), "fund_unit"))
+                .select(pl.col("series_cik").alias("seriesid"), "fund_unit")
+                .sort("seriesid"))
 
 
 def tier_seriesid(npx: pl.DataFrame, crsp: pl.DataFrame,
@@ -164,11 +169,15 @@ def tier_sec_ticker(npx: pl.DataFrame, units: pl.DataFrame,
                 .select("ticker", "fund_unit")
                 .unique()
                 .filter(pl.len().over("ticker") == 1))
+    # DETERMINISM: unique(keep="first") is order-sensitive and joins do not
+    # guarantee row order, so the surviving row must be pinned by a TOTAL sort.
+    # Without this the tier picks a different fund_unit between runs.
     return (npx.filter(pl.col("seriesid").is_not_null())
                .join(sec, on="seriesid", how="inner")
                .join(tkr, on="ticker", how="inner")
                .select("fundid", "fund_unit",
                        pl.lit("via_sec_ticker").alias("match_tier"))
+               .sort(["fundid", "fund_unit"])
                .unique(subset=["fundid"], keep="first"))
 
 
@@ -200,10 +209,15 @@ def tier_sec_name(remaining: pl.DataFrame, sid2unit: pl.DataFrame,
                     .unique()
                     .with_columns(normalize_name("series_name").alias("tgt_norm"))
                     .filter(pl.col("tgt_norm").str.len_chars() > 0)
-                    .unique(subset=["tgt_norm", "series_id"], keep="first"))
+                    # DETERMINISM: sort BEFORE unique(keep="first") so the kept
+                    # row is defined, then the sort also pins the corpus order.
+                    .sort(["tgt_norm", "series_id", "entity_name"])
+                    .unique(subset=["tgt_norm", "series_id"], keep="first")
+                    .sort(["tgt_norm", "series_id"]))
     # Only series that actually reach CRSP are worth matching against.
-    tgt = tgt.join(sid2unit.rename({"seriesid": "series_id"}),
-                   on="series_id", how="inner")
+    tgt = (tgt.join(sid2unit.rename({"seriesid": "series_id"}),
+                    on="series_id", how="inner")
+              .sort(["tgt_norm", "series_id", "fund_unit"]))
     if tgt.is_empty():
         return empty
 
@@ -213,7 +227,7 @@ def tier_sec_name(remaining: pl.DataFrame, sid2unit: pl.DataFrame,
          pl.col("institutionname_modal").fill_null("")).alias("q_app"),
     ).with_columns(normalize_name("q_bare").alias("q_bare_norm"),
                    normalize_name("q_app").alias("q_app_norm")
-                   ).filter(pl.col("q_bare_norm").str.len_chars() > 0)
+                   ).filter(pl.col("q_bare_norm").str.len_chars() > 0).sort("fundid")
     if q.is_empty():
         return empty
 
@@ -250,7 +264,9 @@ def tier_sec_name(remaining: pl.DataFrame, sid2unit: pl.DataFrame,
     cand = (cand.with_columns(
                 pl.when(pl.col("form") == 0).then(pl.col("score"))
                   .otherwise(0.0).alias("bare_score"))
-            .group_by(["fundid", "fund_unit"])
+            # DETERMINISM: see fuzzy_link — sort before any .first().
+            .sort(["fundid", "fund_unit", "col"])
+            .group_by(["fundid", "fund_unit"], maintain_order=True)
             .agg(pl.col("score").max().alias("score"),
                  pl.col("bare_score").max().alias("bare_score"),
                  pl.col("t_mgmt").first().alias("t_mgmt"),
@@ -282,12 +298,13 @@ def tier_sec_name(remaining: pl.DataFrame, sid2unit: pl.DataFrame,
     if not keep:
         return empty
 
-    cand = pl.DataFrame(keep).sort(["fundid", "score"], descending=[False, True])
-    ranked = cand.with_columns(
-        pl.col("score").rank("ordinal", descending=True).over("fundid").alias("rk"))
-    second = (ranked.filter(pl.col("rk") == 2)
+    # DETERMINISM: total tie-break, as in fuzzy_link above.
+    cand = pl.DataFrame(keep).sort(["fundid", "score", "fund_unit"],
+                                   descending=[False, True, False])
+    ranked = cand.with_columns(pl.int_range(pl.len()).over("fundid").alias("rk"))
+    second = (ranked.filter(pl.col("rk") == 1)
                     .select("fundid", pl.col("score").alias("s2")))
-    top = (ranked.filter(pl.col("rk") == 1)
+    top = (ranked.filter(pl.col("rk") == 0)
                  .join(second, on="fundid", how="left")
                  .with_columns(pl.col("s2").fill_null(0.0)))
 
@@ -338,7 +355,9 @@ def fuzzy_link(remaining: pl.DataFrame, units: pl.DataFrame,
                     pl.col("fund_name").str.replace(cfg.L3_CLASS_SUFFIX_RE, "")
                       .alias("tgt_raw"))
                 .with_columns(normalize_name("tgt_raw").alias("tgt_norm"))
-                .filter(pl.col("tgt_norm").str.len_chars() > 0))
+                .filter(pl.col("tgt_norm").str.len_chars() > 0)
+                # DETERMINISM: fixes the corpus row order -> fixes `col` indices.
+                .sort(["tgt_norm", "fund_unit"]))
     if tgt.is_empty():
         return empty
 
@@ -349,7 +368,7 @@ def fuzzy_link(remaining: pl.DataFrame, units: pl.DataFrame,
     ).with_columns(
         normalize_name("q_bare").alias("q_bare_norm"),
         normalize_name("q_appended").alias("q_app_norm"),
-    ).filter(pl.col("q_bare_norm").str.len_chars() > 0)
+    ).filter(pl.col("q_bare_norm").str.len_chars() > 0).sort("fundid")
     if q.is_empty():
         return empty
 
@@ -391,7 +410,11 @@ def fuzzy_link(remaining: pl.DataFrame, units: pl.DataFrame,
     cand = (cand.with_columns(
                 pl.when(pl.col("form") == 0).then(pl.col("score"))
                   .otherwise(0.0).alias("bare_score"))
-            .group_by(["fundid", "fund_unit"])
+            # DETERMINISM: .first() inside group_by takes whatever row the
+            # grouping happens to emit first. Sort the input so "first" is a
+            # defined row, not an accident of hash-map iteration order.
+            .sort(["fundid", "fund_unit", "col"])
+            .group_by(["fundid", "fund_unit"], maintain_order=True)
             .agg(pl.col("score").max().alias("score"),
                  pl.col("bare_score").max().alias("bare_score"),
                  pl.col("t_mgmt").first().alias("t_mgmt"),
@@ -453,14 +476,14 @@ def fuzzy_link(remaining: pl.DataFrame, units: pl.DataFrame,
     cand = pl.DataFrame(keep)
 
     # Top-1 and runner-up per fundid, for the ambiguity margin.
-    cand = cand.sort(["fundid", "score"], descending=[False, True])
-    ranked = cand.with_columns(
-        pl.col("score").rank("ordinal", descending=True).over("fundid").alias("rk"),
-        pl.col("score").max().over("fundid").alias("s1"),
-    )
-    second = (ranked.filter(pl.col("rk") == 2)
+    # DETERMINISM: rank("ordinal") assigns tied scores in frame order, which is
+    # not stable across runs. Sort on (score desc, fund_unit asc) so the tie-break
+    # is TOTAL, then take positional row numbers within each fundid.
+    cand = cand.sort(["fundid", "score", "fund_unit"], descending=[False, True, False])
+    ranked = cand.with_columns(pl.int_range(pl.len()).over("fundid").alias("rk"))
+    second = (ranked.filter(pl.col("rk") == 1)
                     .select("fundid", pl.col("score").alias("s2")))
-    top = (ranked.filter(pl.col("rk") == 1)
+    top = (ranked.filter(pl.col("rk") == 0)
                  .join(second, on="fundid", how="left")
                  .with_columns(pl.col("s2").fill_null(0.0)))
 
@@ -701,7 +724,9 @@ def main() -> None:
     rank = {t: i for i, t in enumerate(TIER_ORDER)}
     resolved = (resolved.with_columns(
                     pl.col("match_tier").replace_strict(rank, default=99).alias("_r"))
-                .sort(["fundid", "_r"])
+                # DETERMINISM: fund_unit makes the tie-break total when one
+                # fundid resolves twice within the same tier.
+                .sort(["fundid", "_r", "fund_unit"])
                 .unique(subset=["fundid"], keep="first")
                 .drop("_r"))
 
