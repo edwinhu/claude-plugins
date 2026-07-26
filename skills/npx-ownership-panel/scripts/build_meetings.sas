@@ -14,24 +14,18 @@
 
 %include "pipeline_config.sas";
 
-/* --- Read PostgreSQL credentials from .pgpass --- */
-/* Why: risk.vavoteresults SAS libname on WRDS can lag the live PG table by months
- * (NFS cache refresh cycle). Pulling via PG pass-through guarantees current data
- * and filters server-side. */
-filename pgf '~/.pgpass';
-data _null_;
-    infile pgf truncover;
-    input line $200.;
-    if index(line, 'wrds-pgdata') > 0 then do;
-        call symputx('pgpw', scan(line, 5, ':'), 'G');
-    end;
-run;
-
-%macro pg_connect;
-    connect to postgres (server='wrds-pgdata-ident-w.wharton.private'
-                         port=9737 user=eddyhu password="&pgpw."
-                         database=wrds)
-%mend;
+/* This script previously read vavoteresults through a PostgreSQL pass-through,
+ * on the rationale that "the SAS libname on WRDS can lag the live PG table by
+ * months (NFS cache refresh cycle)". THAT IS OBSOLETE — verified 2026-07-25,
+ * both copies are identical:
+ *     SAS  max(meetingdate) 2025-12-31   n = 887,341
+ *     PG   max(meetingdate) 2025-12-31   n = 887,341
+ * The library has been refreshed. Reading natively also uses the SAS index
+ * (vavoteresults.sas7bndx, 52 MB on 836 MB, indexed on MeetingDate) and removes
+ * the last .pgpass dependency outside the S12 leg.
+ *
+ * Do not reinstate the pass-through without re-running that comparison.
+ */
 
 /* --- SharkRepellent campaign data (optional) --- */
 %let shark_file = /scratch/nyu/hue/SharkRepellent 5.21.24.xlsx;
@@ -97,20 +91,19 @@ run;
 %mend;
 %load_recs;
 
-/* --- ISS vote results via PostgreSQL pass-through (bypasses stale SAS libname) --- */
+/* --- ISS vote results, native indexed read --- */
+/* %vaFilterSAS is the SAS-literal form of the same predicate stage_npx_link.sas
+ * uses, from pipeline_config.sas — one universe, both legs. The date range is a
+ * BETWEEN on literals so it stays index-friendly. */
 proc sql;
-    %pg_connect;
     create table turnout_raw as
-        select * from connection to postgres (
-            select cusip, companyid, issagendaitemid, itemonagendaid, meetingid,
-                   meetingdate, meetingtype, recorddate, seqnumber, ticker, sponsor,
-                   mgmtrec, voteresult, votedfor, votedagainst, votedabstain,
-                   votedwithheld, brokernonvote, base, outstandingshare,
-                   voterequirement
-            from risk.vavoteresults
-            where %vaFilter(a=vavoteresults)
-        );
-    disconnect from postgres;
+        select cusip, companyid, issagendaitemid, itemonagendaid, meetingid,
+               meetingdate, meetingtype, recorddate, seqnumber, ticker, sponsor,
+               mgmtrec, voteresult, votedfor, votedagainst, votedabstain,
+               votedwithheld, brokernonvote, base, outstandingshare,
+               voterequirement
+        from risk.vavoteresults
+        where %vaFilterSAS;
 quit;
 
 proc sql noprint;

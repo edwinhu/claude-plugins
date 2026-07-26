@@ -38,5 +38,14 @@ sas -nodms -noterminal -nosyntaxcheck \
 rc=$?
 
 grep -hE "S12PART|^ERROR" "logs/split_s12_${R}.log" || true
+# SAS exit codes: 0 = clean, 1 = WARNINGS ONLY, >=2 = errors. Propagating 1
+# makes SGE mark a task failed when it merely emitted a warning — observed on
+# every S12 task in the 2026-07-25 end-to-end run, which all produced correct
+# partitions. Treat 1 as success, surface it, and fail only on >=2.
+if [ "$rc" -le 1 ]; then
+    [ "$rc" -eq 1 ] && echo "NOTE: SAS returned 1 (warnings only) — not a failure"
+    rc=0
+fi
+
 echo "task=$SGE_TASK_ID range=$R wall_s=$(( $(date +%s) - S )) rc=$rc finished=$(date -Is)"
 exit $rc

@@ -41,7 +41,7 @@ the chain; nothing local stays alive. Disconnect, come back, collect the panel.
 | # | Leg | Script | Depends on |
 |---|---|---|---|
 | 1 | Mutual-fund holdings | `split_s12.sas` → `tfn_holdings_parallel.sas` ×N | — |
-| 2 | Institutional holdings | `build_inst_own.sas` (Thomson S34) + EDGAR 13F scrape | — |
+| 2 | Institutional holdings | `build_inst_own.sas` — native indexed read of `tfn.s34type1`/`s34type3` — + EDGAR 13F scrape | — |
 | 3 | N-PX fund votes | `build_npx.sas` (SGE array, one task per year) | **leg 4** |
 | 4 | ISS→CRSP crosswalk | `npx_linking/` → `stage_npx_link.sas` | — |
 
@@ -84,10 +84,17 @@ anywhere, so neither lives in an orchestrator.
 and vote results once; both legs `%include` it. Before it they disagreed —
 2003-2024 with filters vs 2005-2025 with none — and nothing detected it.
 
-**Two hard gates in `merge_panel.sas`**, both `abort abend`:
+**Three hard gates in `merge_panel.sas`**, all `abort abend`:
 - *Prerequisites*: every expected output exists. `-hold_jid` releases on
   **completion, not success**, so a dead leg otherwise lets the merge start.
+- *S12 partitions*: all of `S12_RANGES` present. A refused PostgreSQL connection
+  (per-role cap is **7**, hence `-tc 6`) leaves a partition missing, which shows
+  up as an ownership-*column* gap the universe assertion cannot see.
 - *Universe*: every `out.meetings` item exists in `out.npx_items`.
+
+`tfn_holdings_parallel.sas` also no longer silently falls back to a full 47.4 GB
+`tfn.s12` scan when its partition is absent — that produced plausible output and
+hid the gap. Override with `S12_ALLOW_FULLSCAN=1` only deliberately.
 
 Both fired during verification and caught real failures. That is the point.
 
@@ -97,8 +104,20 @@ Clean checkout on WRDS, one `bash run_pipeline.sh`, 2026-07-25. Two runs, both c
 
 | Run | S12 scope | Wall | `ERROR` lines |
 |---|---|---:|---:|
-| Reduced | 2 of 9 partitions | **12m 17s** | 0 |
-| **Full** | **9 of 9 partitions** | **34m 46s** | **0** |
+| Reduced | 2 of 9 partitions | 12m 17s | 0 |
+| Full | 9 of 9, sequential PG split | 34m 46s | 0 |
+| **Full + S12 array, `build_meetings` native** | **9 of 9** | **36m 1s** | **0** |
+
+**Identity: PASS.** The last run's canonical dump is byte-identical to the
+frozen baseline — same 2,018,866 lines, same
+`sha256 22f13e7679a3f9c15843116195625620dfe835a661ba6c593b1bd9d93503a955`.
+Converting `build_meetings` from a PostgreSQL pass-through to a native indexed
+read moved **no value at 12 significant digits**.
+
+The S12 array cut the partition write from **910s sequential to ~270s** (9 tasks,
+`-tc 6`), but total wall did not drop: the critical path is `tfn_holdings` ×9 and
+the N-PX array, not the split. The win is real and in the wrong place to shorten
+the pipeline — worth having, not worth claiming as a speedup.
 
 Gates on the full run: `PREREQ mf_own_chunks=9 npx_cell_years=21/21` · `UNIVERSE
 meetings_items=623,642 npx_items=712,466 orphans=0`.

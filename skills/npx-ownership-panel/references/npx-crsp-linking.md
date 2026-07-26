@@ -346,6 +346,20 @@ python canonical_hash.py det_A.parquet det_B.parquet --keys fundid
 Verified 2026-07-25 — two cold runs, identical:
 `72af0b880b915960ac7e5141195310ed5d20d544b1ceb00c7cf8be4dc0c7074d`
 
+### Blast radius: the bug was real, the published numbers were not wrong
+
+Measured on the mirror ladder after applying the same fix. Exactly **one fundid**
+(5040841) changed tier — `unlinked` → `feeder_master_name` — and its block stayed
+`active`. That is **40 of 144,320,732 vote rows: 0.0000%**. It does not touch the
+index block, so index cells and downstream flip counts are unaffected.
+
+Both halves of that matter. The defect was real and had to be fixed, because an
+irreproducible crosswalk cannot be identity-tested at all and the *next* run
+might have moved something that counts. But no published figure was wrong, and
+saying so plainly is more useful than implying a correction that did not happen.
+
+Full-ladder hash after the fix: `8c0ddbfe`, superseding `426dc778`.
+
 **Pin the library versions too.** Float behaviour in sparse matmul can shift
 between releases, so a crosswalk can change under an upgrade for a reason nobody
 thinks to look for. Verified against: polars 1.41, scikit-learn (TF-IDF
@@ -415,6 +429,48 @@ slightly lower coverage and the report says so.
 `crsp.crsp_cik_map` is what makes this portable — it carries `series_cik` in
 `S000…` form for 59,244 of 68,382 fundnos, so the majority tier needs nothing
 project-specific.
+
+## Candidate: WRDS S12 fund-name history (NOT evaluated)
+
+A second, independent name vocabulary that may reach the unlinked tail. Recorded
+so it is not lost; **not measured, not implemented.**
+
+`S12_Names_20250630.xlsx` (WRDS, document 1970) — 238,526 rows of
+`(FUNDNO, START_DATE, END_DATE, FUNDNAME)`: 198,967 distinct FUNDNO, 230,652
+distinct name strings, and **28,509 (14.3%) with more than one name spell**.
+
+That long, vintaged shape is exactly what the L2 SEC-series-name tier already
+exploits, and that tier is worth 18.45 points — so the shape is proven here. The
+target is the 5,495 fundids (19.17% of vote rows) still `unlinked`, whose
+failures are concentrated in the name tiers. A fund renamed in 2008 becomes
+matchable from its 2008 name.
+
+**Why it is a candidate and not a drop-in.** `FUNDNO` is the *Thomson* s12 fund
+number, not `crsp_fundno`. The ladder links ISS → CRSP directly; this would add
+a hop:
+
+```
+ISS name → S12 name → thomson fundno → MFLINKS → wficn → crsp_fundno
+```
+
+The bridge exists (`build_mflinks.sas` already runs for the holdings leg), but
+every hop can introduce a wrong link — and **a wrong link is worse than a miss**,
+because it silently reassigns a fund to the wrong block, where the coverage
+report cannot see it.
+
+If evaluated, the conditions are not negotiable:
+
+1. **A new tier BELOW the existing ones**, never replacing them. `via_seriesid`
+   is 19,327 of 21,191 links and must not be perturbed.
+2. **Measure only on the currently-unlinked 5,495.** If it does not move that
+   number materially, the extra hop is not worth it.
+3. **Same guards, and they matter more here.** Digit-token agreement, designator
+   agreement, cross-family veto — a bigger corpus is more near-miss surface.
+4. **Match era-appropriately** using `START_DATE`/`END_DATE`, or you will link a
+   fund to a name it only held *after* the vote being classified.
+5. **Sort the new corpus before it becomes a TF-IDF index** — see
+   [the determinism trap](#determinism-the-join-order--corpus-order-trap). A new
+   corpus is a new place for join order to leak into the match set.
 
 ## See Also
 
