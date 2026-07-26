@@ -84,9 +84,53 @@ gzip -dc out/*.manifest.tsv.gz | awk -F'\t' '$9=="xml" && $10=="ok" && $8==0'
 ```
 
 That query is how the windows-1252 defect was found: **7,023 filings and
-2,628,463 holdings rows** (+3.04% rows, +3.84% of reported value, 768
-institutions) were being dropped. Fixed in `charset.go`; an undecodable charset
-now returns `parse_status=error` rather than an empty table.
+2,628,463 holdings rows** across 768 institutions were being dropped (+3.04% of
+rows). Fixed in `charset.go`; an undecodable charset now returns
+`parse_status=error` rather than an empty table.
+
+**Whether that reaches your numbers is conditional — check both before you act.**
+The mechanism is "holdings that should exist do not"; the consequence depends on
+how your statistic is built.
+
+| | Affected? |
+|---|---|
+| Denominator is an **institutional aggregate** | **Yes, and badly.** Non-index holdings vanish from the denominator, so index/passive shares are inflated — and see the 2023Q3 step below, which makes the inflation time-varying. |
+| Denominator is **shares outstanding** (`x / tso`) | Denominator untouched. Institutional ownership (`ior`) is **understated**; ratios whose numerator comes from elsewhere (S12-derived `mf_pct`, `passive_pct`, `index_pct`) are **unaffected**. |
+| Institutional holdings sourced from **this EDGAR parse** | Yes. |
+| Institutional holdings sourced from **Thomson `s34`** | **No — not at all.** Independent source; this defect cannot touch it. |
+
+Both have to point at you. A `tso` denominator fed from Thomson is clear on both
+counts, and "correcting" such a number for this bug would introduce an error
+rather than remove one.
+
+**The 2023Q3 step is the part worth propagating.** Dropped rows go from **1.60%**
+of holdings (2016Q4–2023Q2) to **5.54%** (2023Q3–2026Q1) — a **3.47× step up**,
+because several filing agents started emitting windows-1252 partway through 2023.
+For an institutional-denominator pipeline that manufactures a *rise in passive
+share from 2023Q3*: a trend in the outcome variable created by a parser bug.
+
+**Index exposure, precisely.** None of the nine largest index managers
+(BlackRock, Vanguard, State Street, Geode, Northern Trust, Fidelity, Dimensional,
+Invesco, Schwab) was ever affected — but smaller index/ETF sponsors were (Global
+X Japan, Mirae Asset Global ETFs, Pacer Advisors, Tortoise Index Solutions,
+DoubleLine ETF Adviser). And several large *active* managers are missing in
+36–38 of 38 quarters (Barrow Hanley, Fiduciary Management, Gardner Russo & Quinn,
+Congress Asset Management, Cooke & Bieler), while others are intermittent — RBC
+11 quarters, CalPERS 8, Two Sigma 5. Intermittent is worse for anything computed
+on *changes*: the institution appears to exit and re-enter, manufacturing
+spurious ownership churn.
+
+## The `value` column changes units at 2023Q1
+
+Not a parser defect — a property of the source — but it invalidates any sum of
+`value` spanning 2023Q1. Mean value per holding goes 152,644 (2022Q4) →
+12,794,119 (2023Q1) and stays there; median moves 442×, p90 494×. Consistent
+with Form 13F moving from thousands of dollars to whole dollars.
+
+It is **not a clean 1000×** — p10 moves only 38×, so the post-2023 population is
+mixed and no single scale factor repairs it. Do not sum or average `value` across
+the boundary; a value-weighted statistic that spans it is dominated by units, not
+holdings. This is why the recovery above is quoted in filings and rows.
 
 ## Things that will bite you
 

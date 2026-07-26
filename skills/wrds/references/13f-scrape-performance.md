@@ -13,7 +13,8 @@ Everything here was measured on wrds-cloud on 2026-07-25 against
 - [Array design](#array-design) — shard on bytes, one slot per task
 - [Byte-identity method](#byte-identity-method)
 - [What identity testing does not prove](#what-a-canonical-hash-identity-test-does-not-prove)
-- [Fixed: filings declared windows-1252 parsed to zero rows](#fixed-filings-declared-windows-1252-parsed-to-zero-rows) — 7,023 filings, 2.6M rows, +3.84% of value
+- [Fixed: filings declared windows-1252 parsed to zero rows](#fixed-filings-declared-windows-1252-parsed-to-zero-rows) — 7,023 filings, 2.6M rows; impact is conditional on your denominator and source
+- [Separate trap: the `value` column changes units at 2023Q1](#separate-trap-the-value-column-changes-units-at-2023q1)
 
 ## The scheduler is the constraint
 
@@ -269,93 +270,6 @@ Run C (230 byte-balanced shards) hashes identically to run A (38 quarter shards)
 on all 38 quarters. Regrouping which filings land in which output file changes
 nothing, as it should: the parser holds no cross-file state.
 
-## What a canonical-hash identity test does not prove
-
-**It proves a refactor was faithful. It cannot prove the behaviour was right.**
-
-The optimisation below passes identity against the shipped parser on all 38
-quarters. The shipped parser was also silently dropping 7,678 filings. Both
-parsers lose the same 3.04% of holdings rows and agree exactly on the loss, so
-the hashes match — and the match says nothing about whether either output is
-correct. A byte-identical reproduction of a bug is still a bug.
-
-This is a property of the method, not a defect in it. `canonical_hash.py`,
-canonical dumps, per-column sums, row-count assertions: every one of them
-answers *"did this change alter behaviour?"* and none of them answers *"was the
-behaviour right?"* The second question needs a test against ground truth — here,
-the observation that a 13F-HR with a populated information table must not parse
-to zero holdings.
-
-Worth internalising because the failure is invisible in exactly the way the
-identity test is: a filing that yields zero rows looks identical, downstream, to
-an institution that did not file. No orphan, no row-count mismatch, no universe
-check catches it.
-
-## Byte-identity method
-
-Parquet and sas7bdat embed timestamps, so file bytes are the wrong test. This
-leg emits gzipped TSV, and gzip embeds nothing that varies here, but the
-**row order is genuinely non-deterministic** regardless: worker goroutines push
-to the writer in completion order, so two runs of unmodified code produce
-different row orders. Canonical-dump equality is therefore the only meaningful
-test, exactly as for the parquet legs.
-
-For each quarter: `gzip -dc | LC_ALL=C sort | sha256sum`, plus row count,
-manifest row count, per-column sums for all five numeric columns
-(`value`, `shares`, `voting_sole`, `voting_shared`, `voting_none`), the
-`cusip_valid` count, the `parse_mode` histogram and the `parse_status`
-histogram — so a mismatch localises to a column instead of a hex string.
-
-There are no floats anywhere in this output. Every numeric column is written by
-`strconv.FormatInt`, so the fixed-precision rendering that the parquet legs need
-is not a concern here; integers are exact.
-
-**Result — all 38 quarters, 86,444,026 holdings rows, 248,500 manifest rows:**
-
-```
-IDENTITY: PASS — every quarter's canonical digest identical
-  shipped parser (run A)  sha256(all 38 digests) = 671ef9d298a22d815b3048b012610982d8be7d45468afdfa4c7a2338d1df939a
-  optimised parser (run B) sha256(all 38 digests) = 671ef9d298a22d815b3048b012610982d8be7d45468afdfa4c7a2338d1df939a
-```
-
-Three further checks:
-
-- **The shared `canonical_hash.py`** (the primitive the other pipeline legs use)
-  agrees, reached independently through parquet rather than sorted text:
-
-  ```
-  A.parquet  rows 2,692,060 x 23  sha256 c1a62dccf1e0779208b16bbfe150a35b7dae3563ca17cca7cef49ac6ff9c4565
-  B.parquet  rows 2,692,060 x 23  sha256 c1a62dccf1e0779208b16bbfe150a35b7dae3563ca17cca7cef49ac6ff9c4565
-  IDENTICAL (canonical sort + 12 sig digits)
-  ```
-
-
-- **Differential harness.** `parse_13f_go -verify-fast-xml` parses every filing
-  *both ways* and compares row structs field by field. Over 2016Q4 and 2024Q2
-  (12,622 filings): **0 mismatches**.
-- **Frozen pre-change baseline.** Three quarters were hashed before any code was
-  written; those digests match run A exactly, confirming the canonical dump is
-  stable across runs despite the non-deterministic row order.
-- **The committed binary is the benchmarked one.** The shipped
-  `parse_13f_go` is built `-trimpath -ldflags=-s`, which the benchmark binary
-  was not, so it was re-checked rather than assumed: 500 filings, 702,339 rows,
-  identical holdings and manifest digests.
-
-### What is not verified
-
-**Run C's shard shape was not hash-compared to run A.** The 38-task hashing
-array was submitted and then put on hold to free grid slots for a concurrent
-job. What *is* proven is that the same binary produces identical output for all
-38 quarters under run B's shape; run C differs only in which filings are grouped
-into which output file, and the parser holds no cross-file state, so the union
-per quarter should be unchanged. Should — that is an argument, not a
-measurement. To close it:
-
-```bash
-qrls <jobid>                                  # release the held hashing array
-cat hashes/runC_*/*.hash | sort > /tmp/C.all  # then diff against /tmp/A.all
-```
-
 ## Fixed: filings declared windows-1252 parsed to zero rows
 
 Found while building the differential harness, then fixed. This mattered more
@@ -383,7 +297,7 @@ parser (7,678 of 248,500, extracted from the run A manifests):
 |---|---|
 | Filings recovered | **7,023** (2.83% of the corpus) |
 | Holdings rows recovered | **2,628,463** — +3.04% on 86,444,026 |
-| Reported value recovered | **$25.74tn of $670.71tn — +3.84%** (summed over quarter-filings, not point-in-time AUM) |
+| Reported value recovered | **withdrawn — see the value-unit break below** |
 | Distinct institutions affected | **768** |
 | Still zero after the fix | 655 — genuinely empty tables, no charset error remained |
 
@@ -391,21 +305,61 @@ No filing hit a charset we cannot decode: windows-1252 and ISO-8859-1 covered
 the entire affected set.
 
 **Who.** Overwhelmingly large foreign banks and asset managers plus public
-pensions — Royal Bank of Canada ($6.7tn over the span, 402,830 rows), Barclays,
-CalPERS, DZ Bank, Schroder, Nomura, Caisse de Dépôt, Two Sigma, Farallon,
-MetLife, Saudi PIF. Consistent with filing agents serving clients whose names
-carry accented characters.
+pensions — Royal Bank of Canada, Barclays, CalPERS, DZ Bank, Schroder, Nomura,
+Caisse de Dépôt, Two Sigma, Farallon, MetLife, Saudi PIF. Consistent with filing
+agents serving clients whose names carry accented characters.
 
-**Does it touch the index block? No — and that makes it worse, not better.**
-Zero matches for BlackRock, Vanguard, State Street, Geode, Northern Trust,
-Fidelity/FMR, Dimensional, Invesco or Schwab: the index managers were never
-affected. So the loss fell entirely on the *non-index* side of institutional
-ownership, which means it **shrank the denominator and inflated `index_pct` and
-`passive_pct`** rather than adding noise to them.
+**Index managers: none of the big nine, but the set is not index-free.** No
+BlackRock, Vanguard, State Street, Geode, Northern Trust, Fidelity/FMR,
+Dimensional, Invesco or Schwab filing was ever affected. But smaller index and
+ETF sponsors are in the 768: Global X Japan, Mirae Asset Global ETFs Holdings,
+Pacer Advisors, Tortoise Index Solutions, DoubleLine ETF Adviser, Amundi Smith
+Breeden. "Zero index exposure" would be too strong; "none of the largest index
+managers" is what the evidence supports.
 
-**And the bias is time-varying, which is the dangerous part.** Recovered filings
-per quarter run ~85–130 through 2023Q2, then jump to 213 in 2023Q3 and hold near
-400 thereafter:
+**Large active managers are hit, which is the part that matters for `ior`.**
+Barrow Hanley, Fiduciary Management, Gardner Russo & Quinn, Congress Asset
+Management and Cooke & Bieler are affected in **36–38 of 38 quarters** — missing
+from the entire panel, not occasionally. Others are intermittent: RBC in 11
+quarters of 38, CalPERS in 8, Two Sigma in 5, MetLife in 1.
+
+That split matters more than the totals. A filer missing in *every* quarter is a
+constant level bias for that institution. A filer missing in *some* quarters is
+worse for anything computed on changes — the institution appears to exit and
+re-enter, manufacturing spurious ownership churn in breadth, turnover and
+entry/exit measures.
+
+### Whether this reaches your panel depends on two things
+
+The mechanism is: holdings that should exist do not. What that does to a
+published number depends entirely on how the number is built, so state your own
+case rather than inheriting one.
+
+**(a) What is the denominator?**
+
+- *Institutional aggregate* (share of total institutional ownership): the drop
+  removes non-index holdings from the denominator, so index and passive shares
+  are **inflated**, and the 2023Q3 step below makes that inflation
+  **time-varying**. This is the dangerous case.
+- *Shares outstanding* (`pct = holdings / tso`): the denominator is untouched.
+  Dropped filings **understate** institutional ownership (`ior`) and leave any
+  ratio whose numerator comes from a different source — mutual-fund/S12-derived
+  `mf_pct`, `passive_pct`, `index_pct` — **completely unaffected**.
+
+**(b) Where do institutional holdings come from?**
+
+- *This EDGAR parse*: affected.
+- *Thomson `s34`* (`tfn.s34type1` / `s34type3`): **not affected at all.** Thomson
+  is an independent source; nothing in this defect touches it.
+
+Both conditions must point at you for the bug to reach your numbers. A pipeline
+with a `tso` denominator that sources institutional ownership from Thomson is
+clear on both counts.
+
+### The 2023Q3 step, which is the finding worth keeping
+
+Recovered filings per quarter run ~85–130 through 2023Q2, then jump to 213 in
+2023Q3 and hold near 400:
 
 ```
 2016Q4  108   2019Q4  107   2022Q4   80   2025Q1  403
@@ -414,14 +368,23 @@ per quarter run ~85–130 through 2023Q2, then jump to 213 in 2023Q3 and hold ne
 2019Q3  116   2022Q2   89   2023Q4  416   2026Q1  378
 ```
 
-Distinct affected filers go from 157 pre-2023Q3 to 519 after. The break is a
+As a share of holdings rows, unit-free:
+
+| Era | Recovered rows | Baseline rows | Share |
+|---|---:|---:|---:|
+| 2016Q4–2023Q2 | 876,663 | 54,844,449 | **1.60%** |
+| 2023Q3–2026Q1 | 1,751,800 | 31,599,577 | **5.54%** |
+
+**A 3.47× step up.** Distinct affected filers go from 157 to 519; recovered
+filings from 2,793 to 4,230 against a *smaller* filing base. The break is a
 filing-agent effect, not a filer one: agents `0001140361` (1,139 filings),
 `0000905148` (501), `0000945621` (209) and others show `pre=0, post=N` — they
-switched to emitting windows-1252 declarations partway through 2023.
+began emitting windows-1252 declarations partway through 2023.
 
-A step change in dropped non-index ownership at 2023Q3 masquerades as a **rise in
-passive ownership share** from 2023Q3 onward. That is a trend, in the outcome
-variable, created by a parser bug.
+For a pipeline in case (a) above, that is the paper-killing shape: a step change
+in dropped non-index ownership at 2023Q3 reads as a **rise in passive share from
+2023Q3 onward** — a trend in the outcome variable manufactured by a parser bug.
+For a pipeline in case (b), it is 5.5% of recent holdings rows simply missing.
 
 ### The fix
 
@@ -461,3 +424,49 @@ those filings and nothing else.
 
 The optimisation and the correctness fix are separate commits for exactly this
 reason: the first must not change a byte, the second must.
+
+## Separate trap: the `value` column changes units at 2023Q1
+
+Found while trying to express the recovery above as a share of reported value.
+It is not a parser defect — it is a property of the source — but it invalidates
+any sum of `value` that spans 2023Q1, so it belongs next to the rest.
+
+Mean reported value per holding, from the run A per-quarter sums:
+
+```
+2022Q2     177,575     2023Q1  12,794,119
+2022Q3     142,336     2023Q2  16,698,741
+2022Q4     152,644     2023Q3  17,571,065
+```
+
+Quarter-sharp, ~84× on the mean, and permanent. Composition cannot do that in one
+quarter, and the distribution confirms it is a rescaling rather than a few large
+filers — for 2022Q4 → 2023Q1 the median moves 565 → 249,875 (**442×**) and p90
+19,329 → 9,555,120 (**494×**). Consistent with Form 13F moving from thousands of
+dollars to whole dollars.
+
+**It is not a clean 1000×, and that is the trap inside the trap.** p10 moves only
+38× against p90's 494×, so the post-2023 population is *mixed*: most filers
+switched to whole dollars, some are still reporting thousands. There is no single
+scale factor that repairs the column.
+
+Consequences:
+
+- **Do not sum or average `value` across 2023Q1.** A panel-wide total is
+  meaningless, and a value-weighted statistic spanning the boundary is dominated
+  by the units, not the holdings.
+- **A value-based share is only interpretable within an era**, and even then only
+  loosely, given the mixed population after 2023Q1.
+- This is why the recovery above is reported in **filings and rows**, which are
+  unit-free. An earlier draft of this document quoted "+3.84% of reported value";
+  that figure summed a column whose unit changes mid-panel, over a recovered set
+  concentrated in the post-2023 era where the unit is ~1000× larger. It was
+  withdrawn rather than patched — there is no correct scalar to patch it with.
+
+Detect it yourself before trusting any value aggregate:
+
+```bash
+gzip -dc out/*.tsv.gz | awk -F'\t' '$12>0 {
+  q=substr($5,1,4)"Q"int((substr($5,5,2)-1)/3)+1; v[q]+=$12; n[q]++ }
+  END{ for (k in v) printf "%s %.0f\n", k, v[k]/n[k] }' | sort
+```
