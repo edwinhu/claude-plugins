@@ -492,6 +492,36 @@ check(
     == 2,
 )
 
+# ---- Bridge claim check: a resolved fund may land on an already-claimed portfolio.
+# Measured in the SEC series-ID investigation: 27.4% of newly-resolved funds hit a
+# crsp_portno another bridged fundno already claims. Raising bridge coverage while
+# doubling portfolios is worse than not bridging at all, so the claim check is the
+# gate between "matched" and "admitted".
+resolved_map = (
+    [{"fundno": 1000 + i, "crsp_portno": 500 + i, "rdate": dt.date(2022, 12, 31)}
+     for i in range(100)]
+    # 27 newly-resolved funds collide onto portfolios already claimed above.
+    + [{"fundno": 9000 + i, "crsp_portno": 500 + i, "rdate": dt.date(2022, 12, 31)}
+       for i in range(27)]
+)
+collisions = dq.detect_duplicate_grain(
+    resolved_map, grain=("crsp_portno", "rdate")
+)
+check("claim check catches already-claimed portfolios", len(collisions) == 1)
+check(
+    "sizes the collision near the measured 27%",
+    collisions and 0.20 <= collisions[0].metrics["duplicate_key_rate"] <= 0.30,
+    f"{collisions[0].metrics['duplicate_key_rate']:.3f}" if collisions else "",
+)
+check(
+    "a one-fundno-per-portfolio map passes",
+    dq.detect_duplicate_grain(resolved_map[:100], grain=("crsp_portno", "rdate")) == [],
+)
+check(
+    "and the same rows look fine at fundno grain -- the wrong key hides it",
+    dq.detect_duplicate_grain(resolved_map, grain=("fundno", "rdate")) == [],
+)
+
 # ===========================================================================
 # F4. Unit discontinuity in `value` at 2023Q1 -- and its non-uniformity
 # ===========================================================================

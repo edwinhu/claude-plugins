@@ -596,6 +596,35 @@ accuracy measured only on funds that bridge is 92.4% at 0.90 — but every fund 
 true match by construction, so that figure cannot transfer to a population where most
 funds have none. The negative control is what makes the precision estimate honest.
 
-At 0.80 this resolves ~1,438 of 4,653 ambiguous funds, cutting union exposure from ~7.7%
-to ~5.3%. A real improvement, not a solution — the remainder still needs the
-`s12_ambiguous` bucket and `detect_unresolved_overlap`.
+⚠️ **These are *implied* precisions, and implied is not end-to-end.** The negative control
+proves a match is not spurious; it does **not** prove the match went to the *right* fund.
+End-to-end ("combined") precision is `implied × top-1 accuracy`, and the follow-up
+investigation measured top-1 directly: at thr 0.80 the direct-to-`portnomap` route has
+top-1 accuracy ~0.92, so combined precision is **~0.89, not ~0.96**. Quote combined
+precision when deciding whether to admit a match.
+
+**Superseded — use the SEC series-ID route instead.** Routing the name match through the
+SEC's published series universe (then `series_cik → crsp_fundno` via `crsp_cik_map`)
+resolves **4.5× more of the ambiguous set at equal precision**: 26.5% vs 5.9% at combined
+precision ~0.95, replicated at 2017. It is still fuzzy at the first hop — S12 has no CIK
+or usable ticker, so no exact key exists — and the gain comes from **grain alignment**:
+SEC series names sit at portfolio grain, the same grain as an S12 fund, whereas
+`portnomap.fund_name` is share-class grain. Ambiguous mass falls 7.72% → 5.70%.
+
+See `docs/investigations/2026-07-26_mflinks-rebuild.md` and
+`skills/wrds/scripts/mflinks_sec_bridge.py` (PR #78). Holdings-content matching was tested
+and **rejected**: it plateaus at 79% top-1 — a portfolio is not a fingerprint.
+
+### ⚠️ Resolving a fund is not the same as being allowed to add it
+
+**27.4% of newly-resolved funds land on a `crsp_portno` that another bridged `fundno`
+already claims.** That is a live double-count: two S12 `fundno`s pointing at one CRSP
+portfolio, either because the resolution is wrong or because Thomson carries the same
+portfolio twice (share classes, or duplicate records — cf. D5b).
+
+So the bridge needs a **claim check**, not just a match score. After resolving, group by
+`crsp_portno` and assert one `fundno` per portfolio per period; on collision, keep the
+higher-confidence link and push the loser back to `s12_ambiguous` rather than admitting
+both. Verify with `detect_duplicate_grain(grain=("crsp_portno", "rdate"))` on the resolved
+map — a bridge that raises coverage while quietly doubling portfolios is worse than no
+bridge at all.
