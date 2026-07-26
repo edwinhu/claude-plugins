@@ -414,3 +414,69 @@ of a few percent, filer counts monotone, and the 2020 4:1 split appearing exactl
 correctly unadjusted (2.59bn → 9.70bn at 2020Q3). The defect is Thomson's, not the
 concept's. Thomson's remaining advantage is history: it starts 1980, EDGAR electronic
 filings start 1999 and XML only in 2013.
+
+
+---
+
+## The S12 alternative: `crsp.holdings` (verified on the WRDS grid)
+
+**S12 does not need an EDGAR/N-PORT parser.** WRDS already carries CRSP Mutual Fund
+portfolio holdings, and it dominates Thomson S12 on every axis that matters. Verified
+directly against `crsp_q_mutualfunds.holdings` (PG) / `/wrds/crsp/sasdata/q_mutualfunds/holdings.sas7bdat`:
+
+| Property | Thomson S12 | `crsp.holdings` |
+|---|---|---|
+| Coverage | ~2003 → 2024-12-31 (mirror) | **2001-12-31 → 2026-03-31** |
+| Rows | — | ~450M (131 GB) |
+| Frequency | quarterly (N-Q / N-CSR) | **monthly** (N-PORT) |
+| Security id | CUSIP → needs `msenames` join | **`permno` and `permco` pre-mapped** |
+| Fund id | `fundno` → MFLINKS chain | `crsp_portno` → `portnomap` directly |
+| Share adjustment | pre-adjusted to FDATE, **incorrectly** (D1) | **as-reported, unadjusted** |
+
+Columns: `crsp_portno, report_dt, security_rank, eff_dt, percent_tna, nbr_shares,
+market_val, crsp_company_key, security_name, cusip, permno, permco, ticker, coupon,
+maturity_dt`.
+
+### Why this resolves D1 for S12
+
+`nbr_shares` is **as-reported at the report date and not back-adjusted** — the same
+property that made EDGAR 13F a clean S34 replacement. Verified on AAPL (permno 14593)
+across the 2020-08-31 4:1 split:
+
+| report_dt | n_funds | total shares |
+|---|---|---|
+| 2020-07-31 | 1,168 | 807,880,873 |
+| 2020-08-31 | 1,142 | 3,109,430,371 |
+
+A 3.85× step with the fund count *flat* — the split appearing exactly once, unadjusted,
+as it should. There is no cumulative pre-adjustment, so there is nothing to double-apply.
+Apply `cfacshr` yourself, once, at a date convention you control.
+
+### It also removes the MFLINKS dependency
+
+Holdings key on `crsp_portno`, so the `fundno → wficn → crsp_fundno → crsp_portno` chain
+disappears. That eliminates **D5's bridge-rate cliff** and **D5b's ~3.95× share-class
+dedup inflation** at the source, rather than detecting them after the fact.
+
+### ⚠️ The one trap: quarter-end months carry a different fund population
+
+`report_dt` is monthly, but **not every fund reports every month**. From the AAPL check:
+quarter-end months carry ~1,600 funds, intermediate months ~1,140 — roughly **40% more
+funds at quarter-ends**. Mixing them into one series manufactures a fake seasonal pattern
+of exactly the kind this file exists to catch (`detect_seasonal_alternation` fires on it,
+correctly).
+
+**Filter to quarter-end months for a quarterly panel.** Do not treat intermediate months
+as comparable observations.
+
+### Recommendation
+
+| Era | Source |
+|---|---|
+| 2001-12 → present | **`crsp.holdings`**, quarter-end months only |
+| pre-2001-12 | Thomson S12, winsorized at split quarters (D1) — the only source |
+
+Never compare levels across 2017Q4 if Thomson is in the series (D5). Cross-checking
+Thomson against CRSP over the overlap is worthwhile, but expect a gap rather than a
+match: per the Jan 2023 note, CRSP sources monthly N-PORT while Thomson sources quarterly
+N-Q/N-CSR, so holdings "should be close, but not exact."

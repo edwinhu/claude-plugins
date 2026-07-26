@@ -309,6 +309,41 @@ check(
     == ["contraction"],
 )
 
+# ---- crsp.holdings is monthly, and quarter-end months carry ~40% more funds.
+# Mixing them manufactures a fake seasonal pattern -- the same shape as the Thomson
+# defect, from an entirely benign cause. Verified on AAPL: ~1,600 funds at quarter-ends
+# vs ~1,140 at intermediate months. The detector must fire, so the trap is caught.
+nport_monthly = []
+for year in (2021, 2022):
+    for month in range(1, 13):
+        last = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30,
+                7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31}[month]
+        quarter_end = month in (3, 6, 9, 12)
+        nport_monthly.append(
+            {
+                "permno": 14593,
+                "rdate": dt.date(year, month, last),
+                "mf_total": 9.4e8 if quarter_end else 6.6e8,
+                "numowners": 1600 if quarter_end else 1140,
+            }
+        )
+check(
+    "catches a naive monthly N-PORT mix as a seasonal artifact",
+    len(dq.detect_seasonal_alternation(nport_monthly, metric_col="mf_total")) == 1,
+)
+check(
+    "filtering to quarter-end months makes it clean",
+    dq.detect_seasonal_alternation(
+        [r for r in nport_monthly if r["rdate"].month in (3, 6, 9, 12)],
+        metric_col="mf_total",
+    )
+    == [],
+)
+check(
+    "and the owner count moves with it, so it is NOT a units bug",
+    dq.detect_flat_owner_share_swing(nport_monthly, shares_col="mf_total") == [],
+)
+
 # ---- MFLINKS bridge regression across the same boundary.
 print("\nF3: MFLINKS bridge-rate detector")
 
