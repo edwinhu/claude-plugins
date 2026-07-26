@@ -462,10 +462,16 @@ dedup inflation** at the source, rather than detecting them after the fact.
 
 `report_dt` is monthly, but **not every fund reports every month**. From the AAPL check:
 quarter-end months carry ~1,600 funds, intermediate months ~1,140 — roughly **40% more
-funds at quarter-ends**. Mixing them into one series manufactures a fake seasonal pattern
-of exactly the kind this file exists to catch (`detect_seasonal_alternation` fires on it,
-correctly).
+funds at quarter-ends** — and total shares run ~1.2–1.4× higher at quarter-ends as a
+result.
 
+That is a *benign cadence effect*, not a defect, and `detect_seasonal_alternation` does
+**not** flag it at the 1.5× default — correctly, since alarming on N-PORT's reporting
+rhythm would cry wolf on every fund panel. (Lower `ratio_threshold` to ~1.3 and it becomes
+visible.) The contrast is the point: the Thomson defect runs **4.5×**, far above this, so
+one default cleanly separates a real defect from normal cadence.
+
+It is still large enough to contaminate a regression that mixes cadences.
 **Filter to quarter-end months for a quarterly panel.** Do not treat intermediate months
 as comparable observations.
 
