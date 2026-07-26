@@ -227,6 +227,25 @@ Three further checks:
 - **Frozen pre-change baseline.** Three quarters were hashed before any code was
   written; those digests match run A exactly, confirming the canonical dump is
   stable across runs despite the non-deterministic row order.
+- **The committed binary is the benchmarked one.** The shipped
+  `parse_13f_go` is built `-trimpath -ldflags=-s`, which the benchmark binary
+  was not, so it was re-checked rather than assumed: 500 filings, 702,339 rows,
+  identical holdings and manifest digests.
+
+### What is not verified
+
+**Run C's shard shape was not hash-compared to run A.** The 38-task hashing
+array was submitted and then put on hold to free grid slots for a concurrent
+job. What *is* proven is that the same binary produces identical output for all
+38 quarters under run B's shape; run C differs only in which filings are grouped
+into which output file, and the parser holds no cross-file state, so the union
+per quarter should be unchanged. Should — that is an argument, not a
+measurement. To close it:
+
+```bash
+qrls <jobid>                                  # release the held hashing array
+cat hashes/runC_*/*.hash | sort > /tmp/C.all  # then diff against /tmp/A.all
+```
 
 ## Open defect: filings declared windows-1252 parse to zero rows
 
