@@ -213,6 +213,75 @@ req = urllib.request.Request(base + "api/contents", headers={"Cookie": jar})
 print(json.loads(urllib.request.urlopen(req).read())["content"][:5])
 ```
 
+### Executing code — the WebSocket path
+
+**Do not build the kernel URL from `location.host`.** Read `wsUrl` and `token` out
+of the `jupyter-config-data` element on the Lab page; `wsUrl` points at a
+different host and already carries the right base path:
+
+```
+correct:   ${cfg.wsUrl}api/kernels/${kernelId}/channels?token=${cfg.token}
+           -> wss://amers1-streaming-io.platform.refinitiv.com/codebook/user/<user>/api/kernels/<id>/channels?token=...
+
+wrong:     wss://${location.host}${cfg.baseUrl}api/kernels/${kernelId}/channels
+           -> wss://workspace.refinitiv.com/codebook/... — never handshakes, no response at all
+```
+
+`amers1` is the Americas region — **read it from `cfg.wsUrl`, do not hardcode it**,
+or this breaks for any other region.
+
+Verified working from the Lab page's own JS context (`evaluate_script` over CDP),
+which is the simplest route because the browser supplies the cookies:
+
+```js
+const cfg  = JSON.parse(document.getElementById('jupyter-config-data').textContent);
+const xsrf = document.cookie.split('; ').find(c => c.startsWith('_xsrf='))?.split('=')[1];
+
+// create your own kernel — do not hijack the user's
+const k = await (await fetch(cfg.baseUrl + 'api/kernels', {
+  method: 'POST', credentials: 'include',
+  headers: {'Content-Type': 'application/json', 'X-XSRFToken': xsrf},
+  body: JSON.stringify({name: 'python3'})})).json();
+
+const exec = (code, timeoutMs = 120000) => new Promise(resolve => {
+  const ws  = new WebSocket(`${cfg.wsUrl}api/kernels/${k.id}/channels?token=${cfg.token}`);
+  const out = [], id = 'm' + Math.random().toString(36).slice(2);
+  let done = false;
+  const fin = () => { if (!done) { done = true; try { ws.close(); } catch (e) {} resolve(out.join('')); } };
+  const timer = setTimeout(fin, timeoutMs);
+  ws.onopen = () => ws.send(JSON.stringify({
+    header: {msg_id: id, username: 'u', session: 's', msg_type: 'execute_request', version: '5.3'},
+    parent_header: {}, metadata: {},
+    content: {code, silent: false, store_history: true, user_expressions: {},
+              allow_stdin: false, stop_on_error: false},
+    channel: 'shell'}));
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.parent_header?.msg_id !== id) return;          // ignore other clients' traffic
+    const t = m.header.msg_type, c = m.content;
+    if (t === 'stream') out.push(c.text);
+    else if (t === 'execute_result' || t === 'display_data') out.push((c.data || {})['text/plain'] + '\n');
+    else if (t === 'error') out.push(c.ename + ': ' + c.evalue + '\n');
+    else if (t === 'status' && c.execution_state === 'idle') { clearTimeout(timer); fin(); }
+  };
+  ws.onerror = () => { clearTimeout(timer); fin(); };
+});
+
+await exec('import refinitiv.data as rd; rd.open_session(); print(rd.session.get_default().open_state)');
+// -> "OpenState.Opened"
+
+// clean up
+await fetch(cfg.baseUrl + 'api/kernels/' + k.id,
+            {method: 'DELETE', credentials: 'include', headers: {'X-XSRFToken': xsrf}});
+```
+
+Filtering on `parent_header.msg_id` matters — the channel carries traffic from
+every client attached to that kernel, so without it you collect the Lab UI's
+messages too.
+
+The same URL should work from `websocket-client` with the cookie jar from step 1,
+but only the in-page route above was actually tested.
+
 ## Gotchas
 
 - **The server must be spawned.** A cold `GET /codebook/` redirects to
@@ -224,5 +293,10 @@ print(json.loads(urllib.request.urlopen(req).read())["content"][:5])
 - **A first-run tour modal** ("Welcome to CodeBook!") overlays the UI; dismiss with **SKIP**
   before driving anything.
 - **Writes need `X-XSRFToken`** set to the `_xsrf` cookie value, or you get a 403.
+- **The kernel WebSocket is on a different host from the page.** Use `cfg.wsUrl`
+  from `jupyter-config-data`, never `location.host`. Getting this wrong produces a
+  silent failure with *no* handshake response — no status code, no error body,
+  just `onerror` then close — which reads exactly like a proxy blocking the
+  upgrade. It is what made this look like an infrastructure outage for a day.
 - **Don't hijack the user's kernels.** Create your own via `POST api/kernels` and
   `DELETE` them when finished; killing a kernel they are using loses their in-memory state.
