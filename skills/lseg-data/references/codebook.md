@@ -73,19 +73,23 @@ Because the official UI is equally broken, scripted access did not cause this.
 The "terminated by an intermediary" evidence is solid, but it does **not** establish that
 the cause is purely server-side. Two things were observed later and are untried:
 
-1. **Stale session / oversized cookie jar.** The `Cookie` header for
-   `workspace.refinitiv.com` is ~6.9 KB. Proxies commonly reject requests whose headers
-   exceed a limit, and a WS upgrade can hit a tighter limit than ordinary GETs — which
-   would produce exactly this signature (no response, or a malformed-request 400,
-   regardless of kernel ID). Supporting this: the one community report of the same symptom
-   was fixed by clearing **cache, history, and active logins** — cache alone was explicitly
-   *not* enough ([community thread 133850](https://community.developers.lseg.com/discussion/133850/error-on-kernel-connecting-in-codebook)).
-   So: clear site data for the Refinitiv/LSEG domains, sign in fresh, retry.
-2. **Unsupported browser.** Workspace Web itself renders a banner: *"BROWSER NOT SUPPORTED
+1. ~~**Stale session / oversized cookie jar.**~~ **TESTED 2026-07-27 — did not fix it.**
+   The community report of this symptom was resolved by clearing cache, history *and*
+   active logins ([thread 133850](https://community.developers.lseg.com/discussion/133850/error-on-kernel-connecting-in-codebook)),
+   and the ~6.9 KB `Cookie` header made a proxy header-size limit plausible. So all 100
+   Refinitiv/LSEG cookies were deleted along with localStorage/IndexedDB/service-workers
+   /cache for those origins, and the session re-established via SSO. The jar shrank to
+   5.7 KB and JupyterHub reported the server up (`pending: null`) — **and the kernel
+   WebSocket still closed 1006.** Cookie size and session staleness are ruled out on this
+   machine. Do not retry this.
+2. **Unsupported browser / different machine — the only avenue left.** Workspace Web
+   renders a banner: *"BROWSER NOT SUPPORTED
    — Some Workspace Web access features may not work correctly. Please use one of our
    supported browsers."* Chromium on Linux is not on LSEG's supported list. This is weak
    evidence on its own (the non-browser Python attempts failed too, and Chromium's UA
-   reports as Chrome), but it is cheap to rule out on a supported browser/OS.
+   reports as Chrome), but with the session hypothesis dead it is the last cheap test:
+   open Codebook on a supported browser/OS (e.g. Chrome on macOS) and run `print(1)`.
+   If it sticks at `[*]` there too, it is server-side and the ticket is justified.
 
 Also note the embedded CodeBook's kernel status reads **"Restarting" / "Waiting…"**, and
 the community report mentions *"Kernel seems to have died. It will be restarted
