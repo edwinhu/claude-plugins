@@ -8,7 +8,12 @@ most capable surface in principle.
 ## Status: read/write yes, execute no
 
 **Verified 2026-07-27, Linux + Chromium/CDP.** The REST surface works with browser cookies.
-Kernel *execution* does not, because the kernel WebSocket channel is refused server-side.
+Kernel *execution* does not — the WebSocket channel never completes its handshake.
+
+Caveat on scope: this was observed on **one account, one machine, one (unsupported)
+browser**. The block sits in front of JupyterHub, but a stale session and an unsupported
+browser have not been ruled out — see "Try these two" below before treating it as
+permanent.
 
 | Capability | Endpoint | Status |
 |-----------|----------|--------|
@@ -61,10 +66,36 @@ Ruled out: the CloudFront signed cookies are a red herring — `CloudFront-Polic
 It is **not** a general WebSocket problem with the browser — from the same tab,
 `wss://echo.websocket.org` opens fine while the Codebook kernel channel returns 1006.
 
-Because the official UI is equally broken, this is a genuine backend/infra fault and not
-something scripted access caused. **It needs an LSEG support ticket**, not more debugging:
-*"WebSocket upgrade to `/codebook/user/<id>/api/kernels/*/channels` never completes — no
-handshake response, 0% success rate, JupyterLab UI cells stuck at `[*]`."*
+Because the official UI is equally broken, scripted access did not cause this.
+
+### Try these two before concluding it is unfixable
+
+The "terminated by an intermediary" evidence is solid, but it does **not** establish that
+the cause is purely server-side. Two things were observed later and are untried:
+
+1. **Stale session / oversized cookie jar.** The `Cookie` header for
+   `workspace.refinitiv.com` is ~6.9 KB. Proxies commonly reject requests whose headers
+   exceed a limit, and a WS upgrade can hit a tighter limit than ordinary GETs — which
+   would produce exactly this signature (no response, or a malformed-request 400,
+   regardless of kernel ID). Supporting this: the one community report of the same symptom
+   was fixed by clearing **cache, history, and active logins** — cache alone was explicitly
+   *not* enough ([community thread 133850](https://community.developers.lseg.com/discussion/133850/error-on-kernel-connecting-in-codebook)).
+   So: clear site data for the Refinitiv/LSEG domains, sign in fresh, retry.
+2. **Unsupported browser.** Workspace Web itself renders a banner: *"BROWSER NOT SUPPORTED
+   — Some Workspace Web access features may not work correctly. Please use one of our
+   supported browsers."* Chromium on Linux is not on LSEG's supported list. This is weak
+   evidence on its own (the non-browser Python attempts failed too, and Chromium's UA
+   reports as Chrome), but it is cheap to rule out on a supported browser/OS.
+
+Also note the embedded CodeBook's kernel status reads **"Restarting" / "Waiting…"**, and
+the community report mentions *"Kernel seems to have died. It will be restarted
+automatically."* A dying kernel is a different failure from a blocked socket, and both may
+be in play — do not assume one explains the other.
+
+If both avenues fail, **open an LSEG support ticket**: *"WebSocket upgrade to
+`/codebook/user/<id>/api/kernels/*/channels` never completes — no handshake response, 0%
+success rate, JupyterLab UI cells stuck at `[*]`."* Note the official answer in the
+community thread to this exact symptom was also "submit a ticket to the Helpdesk".
 
 No alternative execution route exists in the exposed API surface: only `contents`,
 `kernels`, `sessions` and `kernelspecs` are live — no `terminals`, no run/execute REST

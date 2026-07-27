@@ -82,7 +82,7 @@ This is not negotiable. Skipping result inspection is NOT HELPFUL — the user b
 - **A 200 is not proof of success.** Symbology returns HTTP 200 with a per-identifier `errors` array when unentitled, and datagrid returns `null` data with `messages.codes` of `-2 ("empty")` for fields that do not apply. Read `errors` and `messages.codes`, not just the status line.
 - Cross-origin `fetch()` from the Workspace tab is **CORS-blocked** and fails as a bare "Failed to fetch" that looks like a network outage. Workspace-internal endpoints must be called from a tab on their own origin — that is what `in_page_fetch()` does.
 - Deal-level `SCREEN(U(IN(DEALS)) ...)` universes are **rejected by the public datagrid** (`error 218`) and only work through the internal datacloud endpoint via path 3.
-- **Codebook cannot execute code** — the kernel WebSocket is killed by an intermediary before it reaches JupyterHub (no handshake response at all; a bogus kernel ID fails identically to a valid one), including through Codebook's own JupyterLab UI. It is infrastructure, not auth: do not burn time on headers, cookies, or subprotocols. Its contents/kernels REST API does work. See `references/codebook.md`.
+- **Codebook could not execute code** on the one account/machine tested — the kernel WebSocket is killed before it reaches JupyterHub (no handshake response; a bogus kernel ID fails identically to a valid one), including through Codebook's own JupyterLab UI. Do not debug headers or subprotocols; the two things actually worth trying are a full session reset (clear site data + re-login) and a supported browser. Its contents/kernels REST API does work. See `references/codebook.md`.
 
 ### Red Flags — STOP If About To:
 
