@@ -5,15 +5,57 @@ by the same Workspace Web cookies. Its kernels run a pre-authenticated `refiniti
 session (`{name='codebook'}`) with the account's **full** entitlements — which makes it the
 most capable surface in principle.
 
-## Status: read/write yes, execute no
+## Status: WORKING — execution included
 
-**Verified 2026-07-27, Linux + Chromium/CDP.** The REST surface works with browser cookies.
-Kernel *execution* does not — the WebSocket channel never completes its handshake.
+**Corrected 2026-07-27 evening, same account/machine/browser.** Kernel execution
+works. Code was executed three times over CDP on Chromium/Arch, opening a session
+and returning live data.
 
-Caveat on scope: this was observed on **one account, one machine, one (unsupported)
-browser**. The block sits in front of JupyterHub, but a stale session and an unsupported
-browser have not been ruled out — see "Try these two" below before treating it as
-permanent.
+**The kernel WebSocket host is NOT the page host.** Read `wsUrl` from the
+`jupyter-config-data` element instead of assuming `location.host`:
+
+```
+page host   wss://workspace.refinitiv.com/codebook/...              -> never handshakes
+cfg.wsUrl   wss://amers1-streaming-io.platform.refinitiv.com/...    -> opens in ~280ms
+```
+
+A/B on one kernel, at one moment, differing only in host:
+
+| attempt | result |
+|---|---|
+| page host, no subprotocol | `ERROR`, no handshake (1820ms) |
+| page host, **with** `v1.kernel.websocket.jupyter.org` | `ERROR`, no handshake (465ms) |
+| `cfg.wsUrl` host, no subprotocol | **OPEN (280ms)** |
+| `cfg.wsUrl` host, with subprotocol | **OPEN (282ms)** |
+
+So the subprotocol is irrelevant and the host is decisive. The section below
+records the original mis-diagnosis, kept because the failure signature is worth
+recognising.
+
+### What the original analysis got wrong, and the one thing still unexplained
+
+The evidence gathered below was real, but every attempt used
+`wss://workspace.refinitiv.com/...` — `amers1-streaming-io` was never tried. The
+decisive-looking test (a bogus kernel ID failing *identically* to a valid one) does
+not in fact discriminate: a host that does not route `/codebook` WebSockets at all
+fails identically whatever the kernel ID. It reads as "an intermediary terminates
+the connection before the backend" because that is exactly what it is — the
+intermediary is just the wrong hostname.
+
+**Still unexplained, and the reason this is not a clean "it was always the host":**
+the original session reported that *Codebook's own JupyterLab UI* also hung at
+`[*]` with `connections: 0`. The official UI uses the correct host, so that
+observation points at a genuine outage at that time, since resolved. Both stories
+fit the record and the logs cannot separate them:
+
+- **(a) always the wrong host** — the UI check was flawed or misread.
+- **(b) a real outage earlier that has since cleared** — possibly on LSEG's side,
+  in which case the wrong host is a second, independent bug that would have masked
+  the recovery.
+
+If the answer matters, LSEG case 16243957 will settle it. What is *not* in doubt:
+the standing advice below to "not spend time on it" is wrong, and anyone reading
+this should try `cfg.wsUrl` before concluding Codebook is down.
 
 | Capability | Endpoint | Status |
 |-----------|----------|--------|
@@ -23,7 +65,7 @@ permanent.
 | Create / delete kernels | `/user/{name}/api/kernels` | works |
 | Sessions | `/user/{name}/api/sessions` | works |
 | Terminals | `/user/{name}/api/terminals` | 404 (disabled) |
-| **Execute code** | `wss://.../api/kernels/{id}/channels` | **refused — close 1006** |
+| **Execute code** | `wss://.../api/kernels/{id}/channels` | **works — use `cfg.wsUrl` host, NOT the page host** |
 
 ### The execution blocker — an infrastructure block, not an auth problem
 
@@ -37,7 +79,9 @@ Every route to running code fails with close 1006:
   code and submitted it, and the prompt sat at `[*]` indefinitely with no output, with
   `api/kernels` reporting `connections: 0`
 
-**Do not spend time on headers, cookies, or subprotocols — it is not an app-level problem.**
+**Superseded — see the corrected status above.** (Original wording: "do not spend time on
+headers, cookies, or subprotocols". Correct in spirit — none of those were the cause —
+but it stopped the search one step short of the hostname, which was.)
 Traced with the CDP Network domain (`Network.webSocket*` events) on the real Codebook tab:
 
 1. `webSocketCreated` fires.
