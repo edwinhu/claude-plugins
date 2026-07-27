@@ -96,7 +96,14 @@ the community report mentions *"Kernel seems to have died. It will be restarted
 automatically."* A dying kernel is a different failure from a blocked socket, and both may
 be in play — do not assume one explains the other.
 
-If both avenues fail, **open an LSEG support ticket**: *"WebSocket upgrade to
+### Support case raised
+
+**LSEG Support case 16243957** (raised 2026-07-27, product "Workspace", Technical issue →
+Connectivity). It reports the user-visible symptom only — cells stuck at `[*]`, kernel
+stuck "Restarting", everything else in CodeBook working — and the troubleshooting already
+done. Check `support.lseg.com/s/support-cases` for the reply before re-investigating.
+
+If a further ticket is ever needed, the underlying technical detail is: *"WebSocket upgrade to
 `/codebook/user/<id>/api/kernels/*/channels` never completes — no handshake response, 0%
 success rate, JupyterLab UI cells stuck at `[*]`."* Note the official answer in the
 community thread to this exact symptom was also "submit a ticket to the Helpdesk".
