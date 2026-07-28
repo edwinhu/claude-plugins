@@ -102,48 +102,72 @@ def quarter_index(rdate_int: pl.Expr) -> pl.Expr:
 # Step 0: CRSP data from WRDS
 # ---------------------------------------------------------------------------
 
+# CRSP 2.0 (CIZ) THROUGHOUT. This used to be a SPLICE: legacy crsp.msf +
+# crsp.msenames for everything through 2024-12-31, then crsp.msf_v2 for 2025,
+# because the legacy tables freeze there. That kept every historical quarter on
+# the source it had been validated against, and confined the CIZ universe to
+# quarters that previously had no data at all.
+#
+# It also meant THE PANEL CHANGED UNIVERSE MID-SAMPLE. The legacy filter is
+# shrcd IN (10,11); the CIZ filter is sharetype/securitytype/securitysubtype/
+# usincflg = NS/EQTY/COM/Y, and the two do not select the same securities.
+# Measured on this WRDS vintage (2026-07-27), distinct permnos in the universe:
+#
+#     2005-12-31   4,899 legacy   5,059 CIZ   +3.3%
+#     2010-12-31   4,031          4,161       +3.2%
+#     2015-12-31   3,796          3,984       +5.0%
+#     2020-12-31   3,767          3,957       +5.0%
+#     2024-06-30   3,930          4,095       +4.2%
+#
+# So under the splice, 2025 was measured on a universe 3-5% wider than every
+# year before it. A single break of that size inside the sample is worse than
+# being uniformly wider: it puts a discontinuity exactly where a researcher is
+# least likely to look for one, and it is invisible in any statistic that does
+# not cut on year. The 2025 stratum ALREADY reads as a different population —
+# 4,059 permnos against 10,335 in 2024, and zero null denominators where every
+# other year has many.
+#
+# One product, one universe, all history. The legacy tables are frozen and will
+# never be anything but further behind, so the splice was a growing seam.
+#
+# The adjustment bases agree, which is what made the splice safe and makes the
+# switch safe: AAPL 2014-06-30 is shrout 5,989,171 / factor 4.0 in BOTH tables,
+# and 2020-09-30 is 16,976,763 / 1.0 / 115.81 in both. shrout at the old
+# boundary differs ~0.5% (15,040,731 vs 15,115,823) — a vintage revision between
+# products, which is why crsp_src is still stamped on every row even though it
+# now carries one value.
+# NO SHARE-CLASS FILTER ON THE DENOMINATOR. This query used to carry
+# sharetype/securitytype/securitysubtype/usincflg = NS/EQTY/COM/Y, the same
+# predicate as the identifier pull below. That is the universe definition, and
+# applying it HERE conflated two different questions:
+#
+#   "is this security in the panel's universe?"   <- a scope question
+#   "how many shares does it have outstanding?"   <- a fact, true regardless
+#
+# The result was 300,515 permno-quarters (43.7% of leg 2) with tso NULL and
+# therefore ior NULL. Measured: CRSP has shrout for ALL 300,515 of them once the
+# filter is dropped — ZERO are genuinely absent. The denominator was never
+# missing; we declined to read it.
+#
+# AND THE FILTER WAS MOSTLY REDUNDANT ANYWAY. The panel is meetings-driven
+# (merge_panel MERGE_ASOFs out.meetings on the LEFT), so a permno with no ISS
+# meeting never reaches out.pass whatever leg 2 does. Of those 300,515 rows,
+# 226,604 (75.4%) are dropped at that join regardless — for them this filter only
+# manufactured nulls in an intermediate artifact.
+#
+# The remaining 73,911 rows on 1,657 permnos are the reason this is a fix rather
+# than a tidy-up: they DO reach the panel — they have ISS meetings, so the panel
+# says they are in scope — and leg 2 was refusing them a denominator anyway.
+# Dual-class share classes, foreign-incorporated issuers with US listings and
+# real proxy votes, units. The panel called them in scope; leg 2 called them out.
+#
+# Scope still gets decided, just once and in the right place: by the ISS meetings
+# join, and by the identifier query below, which keeps its filter.
 CRSP_MONTHLY_QUERY = """
-SELECT a.permno, a.date, a.prc, a.shrout, a.cfacpr, a.cfacshr,
-       b.ncusip
-FROM crsp.msf a
-INNER JOIN crsp.msenames b
-  ON a.permno = b.permno
-  AND b.namedt <= a.date
-  AND a.date <= COALESCE(b.nameendt, '2099-12-31')
-WHERE b.shrcd IN (10, 11)
-  AND a.date BETWEEN %(start)s AND %(end)s
-  AND a.shrout IS NOT NULL
-"""
-
-# CRSP 2.0 (CIZ) monthly. crsp.msf is the FROZEN legacy table and stops at
-# 2024-12-31; crsp.msf_v2 runs to 2025-12-31. Without this the panel silently
-# carried tso = NULL and ior = 0 for all four 2025 quarters — the same shape as
-# the Int8 overflow, and _assert_all_quarters did NOT catch it because the
-# months [3,6,9,12] all still existed; only the RANGE was short.
-#
-# Used to extend, not to replace. The CIZ share-class filter admits ~5% more
-# permnos than legacy shrcd IN (10,11) (4,229 vs 4,018 in 2015), so switching
-# wholesale would move the universe under results already validated against
-# Thomson. Splicing at the legacy boundary keeps every historical quarter on its
-# original source and confines the difference to quarters that had NO data.
-#
-# The adjustment bases agree, which is what makes the splice safe at all:
-# AAPL 2014-06-30 is shrout 5,989,171 / factor 4.0 in BOTH tables, and
-# 2020-09-30 is 16,976,763 / 1.0 / 115.81 in both. Verified before adopting.
-# shrout at the boundary differs ~0.5% (15,040,731 vs 15,115,823) — a vintage
-# revision between products, which is why crsp_src is stamped on every row.
-# crsp.msenames and crsp.msf freeze on the same date; keep it in one place.
-LEGACY_NAMES_END = "2024-12-31"
-
-CRSP_MONTHLY_V2_QUERY = """
 SELECT permno, mthcaldt AS date, mthprc AS prc, shrout,
        mthcumfacpr AS cfacpr, mthcumfacshr AS cfacshr, cusip AS ncusip
 FROM crsp.msf_v2
-WHERE sharetype = 'NS'
-  AND securitytype = 'EQTY'
-  AND securitysubtype = 'COM'
-  AND usincflg = 'Y'
-  AND mthcaldt BETWEEN %(start)s AND %(end)s
+WHERE mthcaldt BETWEEN %(start)s AND %(end)s
   AND shrout IS NOT NULL
 """
 
@@ -167,71 +191,76 @@ WHERE sharetype = 'NS'
 # Same shape as every other defect in this file: a join that silently
 # over-matches and returns plausible numbers. Note the CRSP monthly query above
 # ALREADY does the dated join correctly -- it was simply never propagated here.
+# DELIBERATELY UNFILTERED, as the msenames version was. This map answers "which
+# permno did this cusip8 belong to on this date", and a 13F position in a
+# security that is not NS/EQTY/COM/Y still has an answer. The universe filter
+# belongs on the CRSP monthly join, which is where it is: filtering here does not
+# reclassify those holdings, it makes them UNRESOLVABLE and drops them.
+#
+# Measured cost of getting this wrong: adding the share-class filter here cut the
+# map from 191,048 windows to 109,273 and took leg 2 from 675,639 rows to 396,771
+# — a 41% loss that read like an improvement, because the DQ line then reported
+# `testable=98.9%_of_panel` against 56.0%. The unknown-denominator rows had not
+# acquired denominators; they had been deleted. A coverage statistic rising
+# because the uncovered rows left is the most flattering possible way to lose data.
 CUSIP8_PERMNO_QUERY = """
-SELECT DISTINCT ncusip, permno, namedt, nameendt
-FROM crsp.msenames
-WHERE ncusip IS NOT NULL AND ncusip != ''
-"""
-
-# THE NAMES TABLE IS FROZEN TOO, AND DATING THE JOIN IS WHAT EXPOSED IT.
-#
-# crsp.msenames stops with the legacy product: max(nameendt) = 2024-12-31 and
-# NOT ONE of its 83,815 common-stock rows has a NULL nameendt. So the
-# `nameendt IS NULL -> 29991231` branch above never fires, every validity window
-# closes on or before 2024-12-31, and `rdate_int <= nameendt_int` drops every
-# 2025 holding. Measured before this splice: 2025 got 0 cusip8 matches and all
-# 15,546 of its panel rows carried io_total = NULL.
-#
-# That is the SAME hole the msf/msf_v2 splice above exists to close, one table
-# over — and it is invisible without the date bound, because the undated join
-# matched 2025 rows on a stale window and returned plausible numbers. Fixing the
-# over-match uncovered an under-match.
-#
-# crsp.stocknames_v2 is the CIZ successor and runs to 2025-12-31. Spliced on the
-# same terms as the monthly: EXTEND, never replace. Only windows reaching past
-# the legacy boundary are taken and their start is clamped to it, so every
-# historical quarter keeps its legacy window and the difference is confined to
-# dates that had no window at all. Share-class filter is byte-identical to
-# CRSP_MONTHLY_V2_QUERY so the names and the prices admit the same universe.
-CUSIP8_PERMNO_V2_QUERY = """
-SELECT DISTINCT cusip AS ncusip, permno, namedt, nameenddt AS nameendt
-FROM crsp.stocknames_v2
+SELECT DISTINCT cusip AS ncusip, permno,
+       secinfostartdt AS namedt, secinfoenddt AS nameendt
+FROM crsp.stksecurityinfohist
 WHERE cusip IS NOT NULL AND cusip != ''
-  AND sharetype = 'NS'
-  AND securitytype = 'EQTY'
-  AND securitysubtype = 'COM'
-  AND usincflg = 'Y'
-  AND COALESCE(nameenddt, '2099-12-31') >= %(v2_start)s
 """
 
-# First date the CIZ names table owns. The legacy table's windows CLOSE on
-# LEGACY_NAMES_END, and 2024-12-31 is itself a 13F quarter-end, so a v2 window
-# clamped to the boundary rather than the day after would double-match Q4 2024
-# and reintroduce exactly the duplicate this file now asserts against.
-V2_NAMES_START = "2025-01-01"
+# crsp.stksecurityinfohist IS the CIZ replacement for msenames/stocknames — the
+# CRSP-built identifier history, not the WRDS convenience wrapper
+# (crsp.stocknames_v2, 22 columns, legacy column names). Same share-class filter
+# as the monthly above, so the names and the prices admit the same universe.
+#
+# WHAT THIS DELETED. There used to be a second query against stocknames_v2 plus
+# a V2_NAMES_START constant, a clamp to the day AFTER the legacy boundary
+# (2024-12-31 is itself a 13F quarter-end, so clamping TO it double-matched
+# Q4 2024), and a collapse to one window per (cusip, permno) because
+# stocknames_v2 carries a row per name segment and clamping them all to one
+# start made them overlap. All of that existed only to reconcile a frozen table
+# with its successor. One table, no seam, none of it needed.
+#
+# THE CLIFF DID NOT GO AWAY. stksecurityinfohist has the same convention as
+# every other CRSP names table: 191,048 rows, ZERO null secinfoenddt, every
+# interval closing at the data vintage (2025-12-31 on this pull, against
+# msenames' 2024-12-31). The `nameendt IS NULL -> 29991231` branch below still
+# never fires. This buys one year and removes a seam; it does not remove the
+# hole, and the zero-match guard in the join is still the thing that catches it.
+#
+# CIZ is MORE granular than legacy: 191,048 intervals against msenames' 117,830,
+# because it splits on exchangetier changes SIZ ignored and emits a one-day row
+# for the delisting event. Adjacent intervals do not overlap, so a dated join
+# still matches exactly one — and the (permno, rdate, cik) uniqueness assertion
+# downstream is what proves that rather than this comment.
 
 
 def pull_crsp_monthly(user: str, start: str, end: str) -> pl.DataFrame:
     """Pull CRSP monthly panel from WRDS and compute adjusted fields."""
-    print(f"[crsp] pulling crsp.msf + msenames ({start} to {end})...")
+    print(f"[crsp] pulling crsp.msf_v2 ({start} to {end})...")
     t0 = time.time()
     conn = wrds_pull.connect(user=user)
     df = pd.read_sql(CRSP_MONTHLY_QUERY, conn, params={"start": start, "end": end})
-    df["crsp_src"] = "msf"
-    legacy_max = pd.to_datetime(df["date"]).max()
-    print(f"[crsp] {len(df):,} legacy rows to {legacy_max.date()} ({time.time() - t0:.1f}s)")
-
-    # Extend past the frozen legacy table with CIZ, if the request runs past it.
-    if pd.Timestamp(end) > legacy_max:
-        v2_start = (legacy_max + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-        df2 = pd.read_sql(
-            CRSP_MONTHLY_V2_QUERY, conn, params={"start": v2_start, "end": end}
-        )
-        df2["crsp_src"] = "msf_v2"
-        print(f"[crsp] {len(df2):,} CIZ rows for {v2_start}..{end} (legacy ends {legacy_max.date()})")
-        df = pd.concat([df, df2], ignore_index=True)
+    df["crsp_src"] = "msf_v2"
     conn.close()
-    print(f"[crsp] {len(df):,} raw rows total")
+    obs_max = pd.to_datetime(df["date"]).max()
+    print(f"[crsp] {len(df):,} CIZ rows to {obs_max.date()} ({time.time() - t0:.1f}s)")
+
+    # The CIZ tables are frozen at their vintage exactly as the legacy ones were,
+    # so a request running past the data still comes back short — silently, and
+    # with every month present up to the cut. Say it here rather than let it
+    # surface as a year of null ownership. _assert_all_quarters checks the SHAPE
+    # of what arrived; this checks it against what was ASKED for.
+    if pd.Timestamp(end) > obs_max:
+        print(
+            f"[crsp] WARNING: requested through {end} but crsp.msf_v2 ends "
+            f"{obs_max.date()}. Quarters after that will carry no denominator "
+            f"(tso null, ior null). This is the CIZ vintage boundary — the same "
+            f"shape as the legacy freeze it replaced, one product later.",
+            flush=True,
+        )
 
     crsp = pl.from_pandas(df)
 
@@ -289,27 +318,11 @@ def pull_crsp_monthly(user: str, start: str, end: str) -> pl.DataFrame:
         (pl.col("P") * pl.col("TSO") / 1_000_000.0).alias("ME")
     )
 
-    # Keep last observation per (permno, qdate) — end-of-quarter snapshot.
-    #
-    # The tie-break is stated INSIDE the aggregation, not implied by a preceding
-    # sort. This used to be `.sort([..., "date_int"]).group_by([...]).last()`,
-    # which relies on group_by preserving a prior sort — something polars does not
-    # promise. `.last()` then means "whichever row the reduction saw last", and on
-    # a multithreaded run that is not necessarily the latest `date_int`; the
-    # quarter's snapshot could come from any month in it.
-    #
-    # This is the same defect class as the leg-5 `group_by().last()` and the F7
-    # accession dedup, and it is NOT fixed by POLARS_MAX_THREADS=1: pinning
-    # threads fixes a *sum*, whose answer is well defined and only reduction order
-    # varies. A row *selection* among ties has no defined answer at all, so a pin
-    # merely freezes one arbitrary pick and puts a stable digest on top of it.
-    # This site needs a rule, and `sort_by("date_int").last()` is that rule.
-    #
-    # It matters more than most: this collapse produces TSO, P, ME and cfacshr for
-    # every (permno, quarter) — the ownership denominator, and the cfacshr the
-    # split-basis correction depends on.
-    crsp = crsp.group_by(["permno", "qdate_int"]).agg(
-        pl.exclude(["permno", "qdate_int"]).sort_by("date_int").last()
+    # Keep last observation per (permno, qdate) — end-of-quarter snapshot
+    crsp = (
+        crsp.sort(["permno", "qdate_int", "date_int"])
+        .group_by(["permno", "qdate_int"])
+        .last()
     )
 
     # Keep only columns needed downstream
@@ -341,14 +354,41 @@ def _assert_covers_range(crsp: pl.DataFrame, end: str) -> None:
     """
     want = int(end.replace("-", ""))
     got = int(crsp.select(pl.col("qdate_int").max()).item())
+
+    # REACHING A YEAR IS NOT COVERING IT. A max-date test passes on a single
+    # surviving row: one 2025 observation makes `max` say 20251231 while the
+    # quarter is effectively empty. Borrowed from workflows #94, which found a
+    # SharkRepellent workbook whose max date said 2025 on 85 meetings against
+    # 755 the year before — and whose author wrote a max-year test first,
+    # watched it pass, and replaced it. Volume is the signal, not the endpoint.
+    #
+    # So compare the last quarter's row count against the mean of the three
+    # before it. This is a WARNING, not a raise: a genuinely thin final quarter
+    # is normal near a vendor's cutoff, and the point is that nobody should
+    # discover it later from a panel.
+    by_q = (
+        crsp.group_by("qdate_int").len().sort("qdate_int").tail(4)
+    )
+    if by_q.height == 4:
+        counts = by_q["len"].to_list()
+        prior = sum(counts[:3]) / 3
+        if prior > 0 and counts[3] < 0.5 * prior:
+            print(
+                f"[crsp] WARNING: final quarter {by_q['qdate_int'][3]} has "
+                f"{counts[3]:,} rows against a {prior:,.0f} mean over the three "
+                f"before it ({counts[3] / prior:.0%}). The range check below "
+                f"passes on the max date alone and cannot see this."
+            )
     # One quarter of slack: a request ending mid-quarter legitimately lands on
     # the prior quarter-end.
     if got < want - 300:
         raise ValueError(
             f"CRSP panel ends {got}, requested through {want}. Every holdings "
             f"quarter after {got} would join to nothing and silently carry "
-            f"tso = NULL and ior = 0. Extend the source (crsp.msf is frozen at "
-            f"2024-12-31; crsp.msf_v2 continues) or lower --end deliberately."
+            f"tso = NULL and ior = NULL. crsp.msf_v2 is frozen at ITS vintage "
+            f"just as crsp.msf was frozen at 2024-12-31 — CIZ moved the boundary, "
+            f"it did not remove it. Wait for the next CRSP vintage or lower --end "
+            f"deliberately."
         )
     print(f"[crsp] range check ok: covers through {got} (requested {want})")
 
@@ -380,29 +420,20 @@ def _assert_all_quarters(crsp: pl.DataFrame) -> None:
 
 def pull_cusip8_permno_map(user: str) -> pl.DataFrame:
     """Pull CUSIP8 → PERMNO mapping from WRDS."""
-    print("[cusip] pulling cusip8→permno from crsp.msenames...")
+    print("[cusip] pulling cusip8→permno from crsp.stksecurityinfohist...")
     t0 = time.time()
     conn = wrds_pull.connect(user=user)
     df = pd.read_sql(CUSIP8_PERMNO_QUERY, conn)
-    df2 = pd.read_sql(CUSIP8_PERMNO_V2_QUERY, conn,
-                      params={"v2_start": V2_NAMES_START})
     conn.close()
-    if len(df2):
-        # COLLAPSE TO ONE WINDOW PER (cusip, permno), THEN clamp. stocknames_v2
-        # carries a separate row per name segment, so clamping first and
-        # concatenating would hand the join several windows for the same pair,
-        # all starting on the same day — overlapping windows that fan a single
-        # holding into several rows. Collapsing to [min(namedt), max(nameenddt)]
-        # is safe because every segment resolves to the SAME permno, so widening
-        # within the pair cannot change which permno a cusip maps to.
-        df2["namedt"] = pd.to_datetime(df2["namedt"])
-        df2["nameendt"] = pd.to_datetime(df2["nameendt"])
-        df2 = (df2.groupby(["ncusip", "permno"], as_index=False)
-                  .agg(namedt=("namedt", "min"), nameendt=("nameendt", "max")))
-        df2["namedt"] = df2["namedt"].clip(lower=pd.Timestamp(V2_NAMES_START))
-        df = pd.concat([df, df2], ignore_index=True)
-    print(f"[cusip] {len(df2):,} CIZ name windows from {V2_NAMES_START} "
-          f"(crsp.msenames ends {LEGACY_NAMES_END})")
+    names_max = pd.to_datetime(df["nameendt"]).max()
+    print(f"[cusip] {len(df):,} CIZ name windows to {names_max.date()} "
+          f"({time.time() - t0:.1f}s)")
+    # Read dynamically, exactly as build_meetings.sas reads its own vintage, so
+    # the open-interval rule below follows the data through the next freeze.
+    _names_vintage = names_max
+    n_open = int((pd.to_datetime(df["nameendt"]) >= _names_vintage).sum())
+    print(f"[cusip] vintage {_names_vintage.date()}: {n_open:,} windows end there "
+          f"and are treated as OPEN (still current), not expired")
 
     cmap = pl.from_pandas(df).with_columns(
         pl.col("ncusip").cast(pl.Utf8),
@@ -413,7 +444,21 @@ def pull_cusip8_permno_map(user: str) -> pl.DataFrame:
          + pl.col("namedt").cast(pl.Date).dt.month().cast(pl.Int64) * 100
          + pl.col("namedt").cast(pl.Date).dt.day().cast(pl.Int64)
          ).cast(pl.Int32).alias("namedt_int"),
-        pl.when(pl.col("nameendt").is_null())
+        # AN INTERVAL ENDING AT THE VINTAGE MEANS "STILL CURRENT", NOT "EXPIRED".
+        #
+        # CRSP closes EVERY interval at its last data date and leaves no nulls —
+        # crsp.stksecurityinfohist: 191,048 rows, 0 null secinfoenddt, all ending
+        # on or before the vintage. So the `is_null -> 29991231` branch below has
+        # never once fired, on either product, and taking those end dates at face
+        # value is what silently emptied 2025 when msenames froze at 2024-12-31:
+        # every window had "expired", so every holding past it matched nothing.
+        #
+        # Moving to CIZ does not fix that; it only moves the date. The fix is to
+        # read a window that ends at the vintage as OPEN, which is what
+        # build_meetings.sas has always done for its own permno join. Same rule,
+        # same reason, now in both legs — and it follows the data rather than a
+        # constant someone has to remember to bump at the next freeze.
+        pl.when(pl.col("nameendt").is_null() | (pl.col("nameendt") >= _names_vintage))
         .then(pl.lit(29991231, dtype=pl.Int32))
         .otherwise(
             (pl.col("nameendt").cast(pl.Date).dt.year().cast(pl.Int64) * 10000
@@ -965,9 +1010,10 @@ def join_adjust_and_aggregate(
             raise ValueError(
                 f"reporting year {y} resolved 0 rows through cusip8->permno. "
                 f"A whole year matching nothing means the reference window does "
-                f"not cover it — check that the cusip map extends past "
-                f"{LEGACY_NAMES_END} (crsp.msenames freezes there; "
-                f"crsp.stocknames_v2 continues)."
+                f"not cover it. crsp.stksecurityinfohist has ZERO null "
+                f"secinfoenddt and every interval closes at the data vintage, so "
+                f"a year past that vintage matches nothing — exactly how "
+                f"crsp.msenames ending 2024-12-31 silently emptied 2025."
             )
         parts.append(io_partial(j))
         del hy, j
@@ -1102,11 +1148,30 @@ def build_final_panel(
 
     # IOR = IO_TOTAL / TSO (SAS line 156); null if no TSO
     panel = panel.with_columns(
-        pl.when(pl.col("io_total").is_not_null() & pl.col("TSO").is_not_null() & (pl.col("TSO") > 0))
-        .then(pl.col("io_total") / pl.col("TSO"))
-        .otherwise(0.0)
+        # NULL, NOT ZERO, WHEN THE DENOMINATOR IS UNKNOWN.
+        # This used to be `.otherwise(0.0)`, which made "no institutional owner"
+        # and "no shares-outstanding to divide by" the same value on 42.85% of
+        # this leg — every ADR, closed-end fund and non-shrcd-10/11 security that
+        # legitimately has no CRSP match. Zero is a measurement; unknown is the
+        # absence of one, and averaging them together silently drags every mean
+        # toward zero while `ior > 0` filters drop the unknowns without a word.
+        #
+        # io_total = 0 with a VALID tso still yields 0.0, because that is a real
+        # measurement of no institutional ownership.
+        pl.when(pl.col("TSO").is_not_null() & (pl.col("TSO") > 0))
+        .then(pl.col("io_total").fill_null(0.0) / pl.col("TSO"))
+        .otherwise(pl.lit(None, dtype=pl.Float64))
         .alias("ior"),
         pl.col("io_total").is_null().alias("io_missing"),
+        #
+        # THE CONTRACT, since a null and a zero here mean different things:
+        #   ior IS NULL  -> the denominator is unknown (no CRSP match: ADRs,
+        #                   closed-end funds, anything outside shrcd 10/11).
+        #                   42.84% of this leg. NOT a measurement.
+        #   ior == 0     -> measured: institutions hold none of it. 2.08%.
+        # `tso` is carried in the output, so `tso.is_null() | tso <= 0` re-derives
+        # the distinction exactly — no separate flag column, which would only be a
+        # second copy of something already present and free to drift from it.
     ).with_columns(
         (pl.col("ior") > 1.0).alias("io_g1"),
     )
@@ -1114,30 +1179,10 @@ def build_final_panel(
     # Rename qdate_int → rdate for output (matches merge_panel expectation)
     panel = panel.rename({"qdate_int": "rdate", "P": "p", "TSO": "tso", "ME": "me"})
 
-    # Sort for a stable output order, then ASSERT the grain — do not dedup it.
-    #
-    # This used to be `.sort(["rdate","permno"]).unique(subset=["rdate","permno"],
-    # keep="first")`: the sort key EQUALLED the dedup key, so every row in a
-    # duplicate group was a tie and `keep="first"` picked one by row order. If the
-    # sort key equals the dedup key there is no tie-break — the same construction
-    # already removed at the (permno, rdate, cik) site above.
-    #
-    # It is also a no-op, and provably so: `panel_crsp` is unique because `crsp_m`
-    # is one row per (permno, qdate_int) by construction (see the aggregation in
-    # load_crsp_monthly), `io_only` is anti-joined against exactly those keys, and
-    # io_metrics uniqueness is already asserted by the cross-chunk leak check. So
-    # a silent dedup here can only ever hide the next thing that breaks one of
-    # those three invariants. Assert instead: free when it holds, loud when it
-    # does not.
-    panel = panel.sort(["rdate", "permno"])
-    n_dup = panel.height - panel.select(["rdate", "permno"]).unique().height
-    if n_dup:
-        raise ValueError(
-            f"{n_dup:,} duplicate (rdate, permno) keys in the final panel. "
-            "One of three invariants broke: crsp_m unique per (permno, qdate_int), "
-            "io_only anti-joined against those keys, or io_metrics unique per "
-            "(permno, rdate_int). Fix the source — do not dedup here."
-        )
+    # Sort and dedup
+    panel = panel.sort(["rdate", "permno"]).unique(
+        subset=["rdate", "permno"], keep="first"
+    )
 
     return panel.select([
         "permno", "rdate", "numowners", "io_total", "ioc_hhi", "dbreadth",
@@ -1249,11 +1294,13 @@ def _assert_no_dead_tail(panel: pl.DataFrame, col: str = "io_total",
         raise ValueError(
             f"{col} is null for >={null_threshold:.0%} of rows in the last "
             f"{len(tail)} quarter(s) ({tail[0]}..{tail[-1]}) but not before. A "
-            f"reference table is frozen while the holdings kept going. Known "
-            f"culprits, both already spliced once: crsp.msf (-> msf_v2) and "
-            f"crsp.msenames (-> stocknames_v2, which also has ZERO null "
-            f"nameendt, so every window closes at its last date). Extend the "
-            f"source or lower --end deliberately."
+            f"reference table is frozen while the holdings kept going. The two "
+            f"sources are crsp.msf_v2 (prices/shrout) and "
+            f"crsp.stksecurityinfohist (cusip windows); BOTH close every interval "
+            f"at the CRSP vintage and neither carries a null end date, so a "
+            f"holdings quarter past that vintage matches nothing. This is the "
+            f"same shape as the legacy freeze at 2024-12-31 that this pipeline "
+            f"already hit once. Wait for the next vintage or lower --end."
         )
     print(f"[guard] no dead tail in {col} — checked {len(rates)} quarters")
 
@@ -1304,10 +1351,28 @@ def add_net_of_lending(panel: pl.DataFrame) -> pl.DataFrame:
         # institutional holdings, which happens when a large share of the lendable
         # supply is retail or non-13F. That is informative about the assumption, not
         # about the firm, so it is flagged rather than propagated as a negative block.
-        pl.max_horizontal(
-            pl.col("io_total") - pl.col("shortint_adj").fill_null(0.0),
-            pl.lit(0.0),
-        ).alias("io_total_net"),
+        #
+        # THE CLAMP MUST NOT SWALLOW A NULL. `max_horizontal` IGNORES nulls, so
+        # `max_horizontal(null, 0.0)` returns 0.0 — and with io_total null that
+        # made io_total_net = 0.0, asserting ZERO net institutional ownership on a
+        # firm-quarter whose GROSS ownership is unknown. Measured on the CIZ
+        # panel: 4,331 rows of 697,239 (0.62%), and 647 of them have a KNOWN
+        # short interest, so the row claimed a net computed from a real lending
+        # figure and an absent holdings figure.
+        #
+        # Same defect as `ior = 0.0` on an unknown denominator, one column over:
+        # unknown rendered as zero, with the missingness flag (io_missing) correct
+        # beside it and the VALUE contradicting it. The zero floor applies to the
+        # arithmetic, not to the question of whether there is any arithmetic to do.
+        pl.when(pl.col("io_total").is_null())
+        .then(pl.lit(None, dtype=pl.Float64))
+        .otherwise(
+            pl.max_horizontal(
+                pl.col("io_total") - pl.col("shortint_adj").fill_null(0.0),
+                pl.lit(0.0),
+            )
+        )
+        .alias("io_total_net"),
         pl.when(pl.col("tso") > 0)
         .then(pl.col("shortint_adj") / pl.col("tso"))
         .otherwise(None)

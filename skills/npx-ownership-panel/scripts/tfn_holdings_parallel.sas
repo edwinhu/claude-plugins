@@ -187,41 +187,82 @@ run;
 
 %put NOTE: Fund-level holdings saved. Starting aggregation...;
 
-/* --- Step 4: CUSIP -> PERMNO mapping --- */
+/* --- Step 4: CUSIP -> PERMNO mapping ---------------------------------------
+ * crsp.stksecurityinfohist, not crsp.msenames: the legacy SIZ tables are frozen
+ * at 2024-12-31 and will never advance, so every year on them widens the gap
+ * against the CIZ tables the rest of the pipeline reads.
+ *
+ * DELIBERATELY UNFILTERED. Narrowing this to NS/EQTY/COM/Y would drop holdings
+ * rather than classify them — the universe filter belongs on the CRSP monthly
+ * join, not here.
+ *
+ * CUSIP8, NOT CUSIP6. cusip6 is ISSUER-level: it maps preferreds and other share
+ * classes onto the common permno, which is D9 cause 2 and the reason leg 2
+ * disables its own cusip6 fallback. This leg used it anyway, so the three legs
+ * did not agree about what a security is.
+ *
+ * Measured before changing it:
+ *   1,047 of 41,348 cusip6 values (2.53%) map to MORE THAN ONE permno
+ *   538,703 of 9,170,717 S12 holdings rows in 2020 (5.87%) sit on one
+ *   tightening to cusip8 costs 155,259 of those rows — 1.69pp of matched rows
+ *
+ * So 1.7 points of coverage buys the removal of fan-out risk on 5.9%. It also
+ * removes an UNDEFINED CHOICE that was invisible: the hash below takes one
+ * permno per key, so every one of those 1,047 collisions was resolved by
+ * whichever row the hash happened to load first from an unordered SELECT
+ * DISTINCT. Not a tie-break — a coin flip, silently, on 5.87% of holdings.
+ *
+ * THE MAP IS UNDATED, WHICH AT THIS KEY TURNS OUT NOT TO MATTER. An undated
+ * cusip->permno map is what manufactured the duplicates leg 2 had to fix with a
+ * dated join, so the same worry applies here — except it is empirically empty:
+ * ZERO of 55,046 cusip8 values in crsp.stksecurityinfohist map to more than one
+ * permno. A cusip8 identifies a security, and CRSP does not reuse one across
+ * permnos. At cusip6 the same count was 1,047. So narrowing the key does not
+ * merely shrink the ambiguity, it removes it, and dating this join would buy
+ * nothing. Measured rather than assumed, in both directions. */
 proc sql;
     create table cusip_permno as
-        select distinct substr(ncusip,1,6) as cusip6 length=6, permno
-        from crsp.msenames
-        where ncusip is not null;
+        select distinct substr(cusip,1,8) as cusip8 length=8, permno
+        from crsp.stksecurityinfohist
+        where cusip is not null;
 quit;
 
 /* --- Step 5: Map holdings to PERMNO --- */
 data holdings_permno;
     if _n_ = 1 then do;
         declare hash hc(dataset: "cusip_permno");
-        hc.defineKey("cusip6");
+        hc.defineKey("cusip8");
         hc.defineData("permno");
         hc.defineDone();
         call missing(permno);
     end;
     set tfn_holdings;
-    cusip6 = substr(cusip8, 1, 6);
     if hc.find() = 0;
     passive_shares = shares * passive;
     index_shares = shares * pure_index;
 run;
 
-/* --- Step 6: Get shares outstanding from CRSP MSF --- */
+/* --- Step 6: Shares outstanding from CRSP monthly (CIZ) ---------------------
+ * crsp.msf_v2, not crsp.msf: the legacy monthly file is frozen at 2024-12-31, so
+ * on it every quarter after that silently produced NO tso row and the mutual-fund
+ * ownership percentages for those quarters came out null — the same failure leg 2
+ * hit, in the leg next door.
+ *
+ * `having date = max(date)` takes the LAST month in the quarter, which is the
+ * end-of-quarter snapshot this join wants. It is a correlated HAVING over the
+ * group, so it states the rule rather than relying on arrival order. */
 proc sql;
     create table msf_qtr as
         select permno,
-               intnx('quarter', date, 0, 'E') as qtr format yymmddn8.,
+               intnx('quarter', mthcaldt, 0, 'E') as qtr format yymmddn8.,
                shrout * 1000 as tso
-        from crsp.msf
-        where date between "01jan&year_start."d and "31dec&year_end."d
+        from crsp.msf_v2
+        where mthcaldt between "01jan&year_start."d and "31dec&year_end."d
         and shrout > 0
+        and sharetype = 'NS' and securitytype = 'EQTY'
+        and securitysubtype = 'COM' and usincflg = 'Y'
         group by permno, calculated qtr
-        having date = max(date);
+        having mthcaldt = max(mthcaldt);
 quit;
 
 /* --- Step 7: Aggregate to permno-quarter --- */

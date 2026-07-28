@@ -272,6 +272,40 @@ data turnout;
     mgmt_for = (mgmtrec = 'For');
 run;
 
+/* TURNOUT IS THE ONLY INDEPENDENT AUDIT OF ISS `tso`, AND THE STEP ABOVE
+ * DESTROYS IT. turnout = votes cast / tso is computed from ISS votes over ISS
+ * shares outstanding — no 13F, no CRSP — so it is the one number here that can
+ * say whether the ISS denominator is right. But rows above 120 are DELETED and
+ * the rest CLIPPED to 100, so by the time anyone looks turnout reads a clean
+ * max of 100.0% with 0.00% above, on a panel whose denominators are
+ * demonstrably broken on 6.8% of rows.
+ *
+ * The delete and the clip both stay — a 300% turnout is not usable as a turnout
+ * and downstream expects [0,100]. What changes is that the EVIDENCE SURVIVES.
+ * Measured on turnout_raw, before either, and printed as a gate line. A clipped
+ * value with no record of what was clipped is indistinguishable from one that
+ * never needed clipping.
+ *
+ * Deliberately NOT a new column: out.meetings feeds digests A and B, and a
+ * diagnostic is not worth moving a frozen schema for. */
+proc sql noprint;
+    select sum(case when outstandingshare > 0 and 100*sum(votedabstain,votedagainst,votedfor,
+                                             brokernonvote,votedwithheld)/outstandingshare > 100
+                    then 1 else 0 end),
+           sum(case when outstandingshare > 0 and 100*sum(votedabstain,votedagainst,votedfor,
+                                             brokernonvote,votedwithheld)/outstandingshare > 120
+                    then 1 else 0 end),
+           count(*),
+           max(case when outstandingshare > 0 then 100*sum(votedabstain,votedagainst,votedfor,
+                                              brokernonvote,votedwithheld)/outstandingshare end)
+      into :n_to100 trimmed, :n_to120 trimmed, :n_torows trimmed, :max_to trimmed
+      from turnout_raw;
+quit;
+%put NOTE: TURNOUT rows=&n_torows. over100=&n_to100. over120=&n_to120. max_raw=&max_to.;
+%put NOTE- TURNOUT over120 are DELETED and 100-120 are CLIPPED, so the panel max reads 100.0;
+%put NOTE- TURNOUT this is the only ISS-only check on ISS tso — a rising over100 count;
+%put NOTE- TURNOUT means the ISS denominator is drifting, and nothing else here can see it.;
+
 /* --- Join ISS/GL recommendations (if available) --- */
 %macro build_turnout;
     %if &have_recs. %then %do;
@@ -348,28 +382,44 @@ proc sort data=meetings1 nodupkey;
 run;
 
 /* --- CRSP permno: CUSIP match then ticker fallback --- */
-/* msenames.nameendt at the data vintage is "still current" — extend those records
- * to an open interval so post-vintage meetings (e.g. current-year) match their
- * latest name record instead of being dropped. Vintage is read dynamically. */
+/* crsp.stksecurityinfohist, not crsp.msenames: legacy SIZ froze at 2024-12-31
+ * and will never advance, so every additional year on it widens the gap against
+ * the CIZ tables the ownership legs read. A meetings leg on the legacy universe
+ * joined to an ownership leg on the CIZ universe is a 3-5% disagreement INSIDE
+ * one panel, which is worse than either universe on its own.
+ *
+ * The open-interval trick is UNCHANGED and still load-bearing. CIZ closes every
+ * interval at its data vintage exactly as SIZ did — crsp.stksecurityinfohist has
+ * 191,048 rows and ZERO null secinfoenddt — so a record ending at the vintage
+ * means "still current", not "expired". Without this, post-vintage meetings
+ * match nothing and drop silently. Vintage is read dynamically so it follows the
+ * data instead of a constant someone has to remember to bump. */
 proc sql noprint;
-    select max(nameendt) format=date9. into :crsp_vintage trimmed
-        from crsp.msenames;
+    select max(secinfoenddt) format=date9. into :crsp_vintage trimmed
+        from crsp.stksecurityinfohist;
 quit;
-%put NOTE: crsp.msenames vintage max nameendt = &crsp_vintage;
+%put NOTE: crsp.stksecurityinfohist vintage max secinfoenddt = &crsp_vintage;
 
 proc sql;
     create table meetings2 as
         select distinct b.permno, a.*
-        from meetings1 a, crsp.msenames b
-        where substr(a.cusip,1,6)=substr(b.ncusip,1,6)
-        and a.meetingdate >= b.namedt
-        and (a.meetingdate <= b.nameendt or b.nameendt >= "&crsp_vintage"d);
+        from meetings1 a, crsp.stksecurityinfohist b
+        /* CUSIP8, NOT CUSIP6. cusip6 is issuer-level and maps preferreds and
+         * other share classes onto the common permno — D9 cause 2, which leg 2
+         * disables in its own fallback. ISS `cusip` is uniformly 9 characters
+         * (886,995 of 886,995), so substr(,1,8) is a real cusip8 and not a
+         * truncation artefact. Measured cost of tightening across the S12 leg:
+         * 1.69pp of matched rows, against fan-out risk on 5.87%. The ticker
+         * fallback in meetings3 below still catches items this drops. */
+        where substr(a.cusip,1,8)=substr(b.cusip,1,8)
+        and a.meetingdate >= b.secinfostartdt
+        and (a.meetingdate <= b.secinfoenddt or b.secinfoenddt >= "&crsp_vintage"d);
     create table meetings3 as
         select distinct b.permno, a.*
-        from meetings1 a, crsp.msenames b
-        where a.ticker = coalescec(b.ticker,b.tsymbol)
-        and a.meetingdate >= b.namedt
-        and (a.meetingdate <= b.nameendt or b.nameendt >= "&crsp_vintage"d)
+        from meetings1 a, crsp.stksecurityinfohist b
+        where a.ticker = coalescec(b.ticker,b.tradingsymbol)
+        and a.meetingdate >= b.secinfostartdt
+        and (a.meetingdate <= b.secinfoenddt or b.secinfoenddt >= "&crsp_vintage"d)
         and a.meetingid not in (select distinct meetingid from meetings2);
 quit;
 

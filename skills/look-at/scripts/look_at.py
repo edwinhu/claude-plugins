@@ -1,4 +1,8 @@
-#!/usr/bin/env -S uv run python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["google-genai"]
+# ///
 """Analyze media files using Gemini 2.5 Flash Lite for fast, cost-effective interpretation.
 
 This script uploads a local file to Google's Gemini API and extracts specific information
@@ -6,17 +10,17 @@ based on the provided goal. It's designed to be used by Claude Code as a tool fo
 files that require interpretation beyond raw text.
 
 Usage:
-    uv run python3 look_at.py --file <path> --goal "<what to extract>" [--model <model_name>]
+    uv run --script look_at.py --file <path> --goal "<what to extract>" [--model <model_name>]
 
 Examples:
     # Extract title from PDF
-    uv run python3 look_at.py --file report.pdf --goal "Extract the title and date"
+    uv run --script look_at.py --file report.pdf --goal "Extract the title and date"
 
     # Describe diagram
-    uv run python3 look_at.py --file diagram.png --goal "Explain the architecture shown"
+    uv run --script look_at.py --file diagram.png --goal "Explain the architecture shown"
 
     # Extract table data
-    uv run python3 look_at.py --file data.pdf --goal "Extract the table as JSON"
+    uv run --script look_at.py --file data.pdf --goal "Extract the table as JSON"
 
 Environment (checked in order):
     GOOGLE_API_KEY: Google API key for Gemini access.
@@ -38,7 +42,8 @@ try:
     from google.genai import types
 except ImportError:
     print("Error: google-genai package not installed", file=sys.stderr)
-    print("Install with: pip install google-genai", file=sys.stderr)
+    print("Run this script with `uv run --script look_at.py` so uv can", file=sys.stderr)
+    print("provision the inline PEP 723 dependencies automatically.", file=sys.stderr)
     sys.exit(1)
 
 

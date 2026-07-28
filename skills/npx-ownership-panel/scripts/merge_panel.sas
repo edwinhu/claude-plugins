@@ -61,9 +61,42 @@
     %local missing;
     %let missing = ;
 
-    %if not %sysfunc(exist(out.meetings)) %then %let missing = &missing. out.meetings;
-    %if not %sysfunc(exist(out.inst_own)) %then %let missing = &missing. out.inst_own;
-    %if not %sysfunc(exist(out.npx_items)) %then %let missing = &missing. out.npx_items;
+    /* EXISTENCE IS NOT CONTENT. This gate checked exist() alone, and an EMPTY
+     * dataset exists. Observed 2026-07-27: leg 5 died on a SQL error, so leg 2's
+     * own guard correctly refused to write its CSV, so import_inst_own created
+     * out.inst_own with ZERO rows — and this gate passed it. merge_panel then
+     * built a complete-looking 2,019,563 x 81 panel with NO institutional
+     * ownership in it, and every gate line in the run reported clean:
+     *
+     *     PREREQ   mf_own_chunks=9 npx_cell_years=21/21 s12_partitions=9/9
+     *     UNIVERSE meetings_items=624,162 npx_items=712,466 orphans=0
+     *
+     * That is precisely the failure this gate exists to prevent, one level down:
+     * `hold_jid` releases on COMPLETION not success, so the gate has to check
+     * what arrived — and "it is there" was never the question. Row counts are the
+     * question. */
+    %local n_meet_rows n_io_rows n_item_rows;
+    %macro _rows(ds, into);
+        %if %sysfunc(exist(&ds.)) %then %do;
+            %local dsid;
+            %let dsid = %sysfunc(open(&ds.));
+            %let &into. = %sysfunc(attrn(&dsid., nlobs));
+            %let dsid = %sysfunc(close(&dsid.));
+        %end;
+        %else %let &into. = -1;
+    %mend;
+    %_rows(out.meetings,  n_meet_rows)
+    %_rows(out.inst_own,  n_io_rows)
+    %_rows(out.npx_items, n_item_rows)
+
+    %if &n_meet_rows. < 0 %then %let missing = &missing. out.meetings(absent);
+    %else %if &n_meet_rows. = 0 %then %let missing = &missing. out.meetings(EMPTY);
+    %if &n_io_rows. < 0 %then %let missing = &missing. out.inst_own(absent);
+    %else %if &n_io_rows. = 0 %then %let missing = &missing. out.inst_own(EMPTY);
+    %if &n_item_rows. < 0 %then %let missing = &missing. out.npx_items(absent);
+    %else %if &n_item_rows. = 0 %then %let missing = &missing. out.npx_items(EMPTY);
+
+    %put NOTE: PREREQ rows meetings=&n_meet_rows. inst_own=&n_io_rows. npx_items=&n_item_rows.;
 
     /* At least one mutual-fund ownership chunk from tfn_holdings_parallel. */
     %local n_mf;
@@ -177,6 +210,50 @@ run;
 
 proc sort data=out.index_own nodupkey; by rqdate permno; run;
 
+/* --- D5: the S12 feed changed at 2017Q4, and levels do not compare across it -
+ *
+ * Thomson switched S12 from legacy SP to "strategic collection" from 2017Q4
+ * (backfilled 2022Q4): CUSIPs in fund holdings +613%, unique funds +113%,
+ * fund-CUSIP observations +265%, and 34,385 funds appear that did not exist in
+ * the old feed. It is a genuine coverage EXPANSION, not corruption — which is
+ * exactly why it is dangerous: every level series through 2017Q4 has a step in
+ * it that looks like a finding about funds rather than about the feed.
+ *
+ * MFLINKS was NOT backfilled for 2017Q4-2020Q2, so `wficn` bridge rates drop
+ * precisely there and the expansion does not reach the panel evenly. WRDS's own
+ * advice for that window is to identify US equity funds from Factset or CRSP
+ * rather than from MFLINKS.
+ *
+ * Reported, not corrected. There is no correction to make — the later data is
+ * better, and truncating the panel to the worse era would be the wrong trade.
+ * What can be done is refuse to let the step be invisible: print the counts
+ * either side of the boundary as a gate line, so anyone comparing mf ownership
+ * levels across it sees the discontinuity in the same grep as every other gate.
+ *
+ * See skills/wrds/references/tfn-ownership.md D5. */
+/* NOT %local — this is OPEN CODE and %LOCAL is only valid inside a macro.
+ * Written as %local it errors, the variables are never created, and every
+ * %put below prints the ampersand literally while the run carries on. See
+ * #111: that exact mistake cost a 32-minute run and produced no panel. */
+proc sql noprint;
+    select sum(case when rqdate <  '01oct2017'd then 1 else 0 end),
+           sum(case when rqdate >= '01oct2017'd then 1 else 0 end),
+           count(distinct case when rqdate <  '01oct2017'd then permno end),
+           count(distinct case when rqdate >= '01oct2017'd then permno end)
+      into :d5_pre_rows trimmed, :d5_post_rows trimmed,
+           :d5_pre_permno trimmed, :d5_post_permno trimmed
+    from out.index_own;
+quit;
+%put NOTE: D5 s12_pre2017Q4 rows=&d5_pre_rows. permnos=&d5_pre_permno. | post rows=&d5_post_rows. permnos=&d5_post_permno.;
+%put NOTE- D5 the S12 feed changed at 2017Q4 (legacy SP -> strategic collection);
+%put NOTE- D5 a coverage EXPANSION, so any mf-ownership LEVEL comparison spanning;
+/* No bare `;` inside a %put — it TERMINATES the statement, and everything
+ * after it parses as a stray statement. That is what broke this file: the
+ * semicolon in "2017Q4 is invalid; MFLINKS..." ended the %put, the rest
+ * raised ERROR 180-322, and the cascade emptied out.pass_npx (0 obs, 17
+ * vars) while the log still showed the D5 gate printing correctly. */
+%put NOTE- D5 2017Q4 is invalid. MFLINKS was not backfilled 2017Q4-2020Q2 either.;
+
 /* --- Sort inputs for MERGE_ASOF --- */
 proc sort data=out.inst_own;  by permno rdate;                     run;
 proc sort data=out.index_own; by permno rqdate;                    run;
@@ -251,26 +328,83 @@ data out.pass;
         ior_net = min(100, max(0, io_total_net / tso * 100));
     else ior_net = .;
 
-    /* Pivotalness: forpct and the pcts are both on [0,100] */
-    inst_pivotal    = abs(forpct-50) <= coalesce(ior,0);
-    mf_pivotal      = abs(forpct-50) <= coalesce(mf_pct,0);
-    passive_pivotal = abs(forpct-50) <= coalesce(passive_pct,0);
-    index_pivotal   = abs(forpct-50) <= coalesce(index_pct,0);
+    /* Pivotalness: forpct and the pcts are both on [0,100].
+     *
+     * NULL WHERE THE OWNERSHIP IS UNKNOWN, NOT 0. These were
+     * `<= coalesce(ior,0)`, which turns "we have no denominator for this firm"
+     * into "this firm's owners hold nothing" at the moment the flag is set —
+     * so a row with no measurable ownership was recorded as KNOWN NOT PIVOTAL,
+     * indistinguishable from one measured at 0.4% and genuinely not pivotal.
+     * The coalesce re-conflated downstream exactly what the null upstream
+     * exists to protect: leg 2 stopped writing ior = 0.0 for an unknown
+     * denominator, and this put the zero back.
+     *
+     * It is not rare. 42.85% of leg-2 rows have no CRSP denominator, and the
+     * ISS-side `tso` used here has its own gaps, so a false 0 here is a false
+     * "not pivotal" on a large minority of the panel.
+     *
+     * `inst_pivotal_net` immediately below already did this correctly, and its
+     * comment says why in one line — "null where lending is unknown, so it
+     * cannot quietly fall back to the gross measure". Same argument, four
+     * columns earlier. */
+    if not missing(ior)         then inst_pivotal    = abs(forpct-50) <= ior;
+    else inst_pivotal = .;
+    if not missing(mf_pct)      then mf_pivotal      = abs(forpct-50) <= mf_pct;
+    else mf_pivotal = .;
+    if not missing(passive_pct) then passive_pivotal = abs(forpct-50) <= passive_pct;
+    else passive_pivotal = .;
+    if not missing(index_pct)   then index_pivotal   = abs(forpct-50) <= index_pct;
+    else index_pivotal = .;
     /* Reported ALONGSIDE inst_pivotal, not instead of it: null where lending
      * is unknown, so it cannot quietly fall back to the gross measure. */
     if not missing(ior_net) then inst_pivotal_net = abs(forpct-50) <= ior_net;
     else inst_pivotal_net = .;
 run;
 
-/* --- Diagnostic: how far apart are the CRSP and ISS denominators? ---------- */
-proc sql;
-    select
-        sum(case when abs(tso_crsp_inst - tso) / tso > 0.10 then 1 else 0 end)
-            as n_crsp_iss_gap_gt_10pct format comma12.,
-        count(*) as n_total format comma12.
+/* --- Diagnostic: how far apart are the CRSP and ISS denominators, AND WHICH WAY
+ *
+ * THE ABS() WAS THE PROBLEM. This counted |tso_crsp - tso|/tso > 10% — symmetric,
+ * so it could not distinguish the two failure modes, which are not equally
+ * visible:
+ *
+ *   ISS tso TOO SMALL -> ior too big  -> trips detect_impossible_ratio (>100%)
+ *   ISS tso TOO LARGE -> ior too small -> trips NOTHING, ever
+ *
+ * Every ratio check in the suite is one-sided in exactly this way: a denominator
+ * that is too large just biases ownership downward, silently, and no threshold
+ * anywhere fires on it. This is the ONLY place both denominators exist on the
+ * same row, so it is the only place the invisible direction can be counted at all.
+ *
+ * Emitted as a gate line so the same grep picks it up as PREREQ / UNIVERSE /
+ * OPTIONAL / DQ / TURNOUT. A number that only reaches the .lst is a number
+ * nobody reads. */
+/* NOT %local: this is OPEN CODE, and `%LOCAL` is only valid inside a macro.
+ * Written as %local it raised "The %LOCAL statement is not valid in open
+ * code", the five macro variables were never created, every %put below
+ * printed &n_dboth. literally, and the cascade took out the UNIVERSE gate and
+ * out.pass_npx with it — a 32-minute run that produced no panel.
+ *
+ * Exactly the defect #100 fixed in import_inst_own.sas (`%abort cancel` in
+ * open code), reintroduced by me three PRs later. The tell is the same: SAS
+ * reports it as an ERROR and keeps going, so the log names the construct and
+ * the run continues into wreckage.
+ *
+ * I tested the SQL standalone and it passed. The SQL was never the risk. */
+proc sql noprint;
+    select count(*),
+           sum(case when tso > tso_crsp_inst * 1.10 then 1 else 0 end),
+           sum(case when tso > tso_crsp_inst * 3.00 then 1 else 0 end),
+           sum(case when tso_crsp_inst > tso * 1.10 then 1 else 0 end),
+           sum(case when tso_crsp_inst > tso * 3.00 then 1 else 0 end)
+      into :n_dboth trimmed, :n_iss_hi trimmed, :n_iss_hi3 trimmed,
+           :n_crsp_hi trimmed, :n_crsp_hi3 trimmed
     from out.pass
     where tso > 0 and tso_crsp_inst > 0;
 quit;
+%put NOTE: DENOM rows_with_both=&n_dboth. iss_gt_crsp_10pct=&n_iss_hi. iss_gt_crsp_3x=&n_iss_hi3. crsp_gt_iss_10pct=&n_crsp_hi. crsp_gt_iss_3x=&n_crsp_hi3.;
+%put NOTE- DENOM iss_gt_crsp means ior is UNDERSTATED and NO ratio check can see it;
+%put NOTE- DENOM crsp_gt_iss means ior is OVERSTATED and detect_impossible_ratio catches it;
+%put NOTE- DENOM the >100%% rate is therefore only HALF a denominator test, by construction;
 
 proc contents data=out.pass order=varnum; run;
 

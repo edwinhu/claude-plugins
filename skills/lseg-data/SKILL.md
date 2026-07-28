@@ -154,13 +154,78 @@ ld.close_session()
 
 ## Authentication
 
-Three options. The first two are for the `lseg.data` library; the third needs no credentials of your own.
+Four options. The first two are for the `lseg.data` library; the last two need no credentials of your own. The first two are for the `lseg.data` library; the third needs no credentials of your own.
 
 **Platform session (works on every OS)** — config file or environment variables, below. This is the only `lseg.data` session type available on Linux.
 
 **Desktop session** — requires the Refinitiv Workspace desktop app running locally. Windows/macOS only; not an option on Linux.
 
 **Borrowed browser session** — no credentials at all: `scripts/workspace_cdp.py` lifts the access token out of a signed-in Workspace Web tab. Use this when machine credentials are unavailable or expired. See `references/workspace-web-cdp.md`.
+
+**Codebook (hosted)** — LSEG's own JupyterHub inside Workspace Web. Its kernels
+open a pre-authenticated `DesktopSession` named `codebook` on LSEG's servers, so
+it needs no local credentials and no local Workspace app, and it does not consume
+the one-session platform quota below. Same entitlements as the platform session,
+not broader. See `references/codebook.md`.
+
+The rest of this section is about getting a **platform session** working, which is
+where all the sharp edges are.
+
+### On this setup: use the agenix secret
+
+Credentials live in agenix as `lseg-credentials`, decrypted to
+`$LSEG_CREDENTIALS_FILE` (mode 400). It is a shell-sourceable file, so **source
+it, do not `cat` it into a variable**:
+
+```bash
+set -a; . "$LSEG_CREDENTIALS_FILE"; set +a   # exports LSEG_APP_KEY / LSEG_USERNAME / LSEG_PASSWORD
+```
+
+**THE VARIABLE NAMES DO NOT MATCH THE LIBRARY'S.** The secret exports `LSEG_*`;
+everything below documents `RDP_*`. You must map them at the call site. Reading
+this section and exporting `RDP_APP_KEY` from a file that defines `LSEG_APP_KEY`
+gets you an empty environment and a session that fails on first query.
+
+Before 2026-07-27 these existed only as plaintext in `mbp:~/projects/svb/.envrc`,
+so anything running on another machine had no credentials at all. If a lookup
+comes back empty, check that host's rebuild is current before concluding the
+account is unentitled.
+
+### `platform.Password` DOES NOT EXIST
+
+The config-file example below hides the programmatic form, and the obvious guess
+is wrong. In `lseg-data` 2.1.1 the class is **`GrantPassword`**:
+
+```python
+import lseg.data as ld
+from lseg.data.session import platform
+
+s = platform.Definition(
+        app_key=os.environ["LSEG_APP_KEY"],
+        grant=platform.GrantPassword(username=os.environ["LSEG_USERNAME"],
+                                     password=os.environ["LSEG_PASSWORD"]),
+    ).get_session()
+s.open()
+ld.session.set_default(s)
+```
+
+`platform` exports exactly three names — `ClientCredentials`, `Definition`,
+`GrantPassword`. Check `dir()` before trusting a class name from the docs.
+
+### `open_session()` DOES NOT RAISE ON FAILURE
+
+With no config and no credentials it falls back to a **desktop** session, tries
+`http://localhost:9000/api/handshake` (LSEG Workspace running locally), logs the
+connection failure, and **returns normally**. The error only surfaces on the
+first query as `ValueError: Session is not opened`.
+
+So `open_session()` returning is NOT evidence of a session. This is the same
+silent-failure shape as the Iron Law above, one layer earlier: verify by issuing
+a cheap query (`TR.PriceClose` on a liquid RIC) and inspecting the value.
+
+### Config file / environment variables (upstream documentation)
+
+Configure LSEG authentication using either a config file or environment variables.
 
 ### Config File Method
 
