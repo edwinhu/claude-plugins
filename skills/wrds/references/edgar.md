@@ -751,6 +751,14 @@ Scripts live at `skills/wrds/scripts/sec_index_rga/`:
 | `submit_array.sh` | `#$ -t 1-N -l m_mem_free=2G` wrapper; `exec`s the scanner |
 | `build_index.py` | Local driver: refresh shard list, qsub, poll qstat, rclone TSVs back, concat to parquet |
 | `scan_shard.sh` | Legacy awk-per-file baseline (kept as fallback) |
+| `scan_shard_rg_awk.sh` | Variant A (`rg \| awk`) — the parity FAILURE in the table below. Kept because it is the evidence for choosing Go, not a usable scanner |
+| `benchmark.sh` | Runs all three variants on one shard and diffs `(path, role, cik)` fingerprints. This is what produced the numbers below; re-run it before changing any concurrency default |
+
+**Paths:** nothing in these scripts names a user or an institution. All honour
+`WRDS_SCRATCH` (default `/scratch/${WRDS_INST:-nyu}/$(whoami)`), plus the narrower
+`SHARD_LIST` / `OUT_DIR` / `GO_BIN` / `SCAN_BIN` / `ARCHIVE_ROOT` overrides. The one
+exception is `#$ -o logs/` in `submit_array.sh`: SGE parses `#$` directives before the
+shell runs, so a variable there is a literal — override with `qsub -o <dir>` instead.
 
 **Build & deploy:**
 
@@ -796,6 +804,14 @@ at opens but loses parity because `rg` has no per-file byte limit equivalent to 
 **Concurrency:** the wrapper defaults to `$NSLOTS × 8` with a floor of 16. Bump via
 `GO_CONCURRENCY=32` if you request more slots. NFS open is I/O-bound so over-subscribing
 past CPU count helps.
+
+`GOMAXPROCS` and `GO_CONCURRENCY` are different knobs and only the second is the throughput
+lever. `GOMAXPROCS` is pinned to `$NSLOTS` purely so Go does not size its thread pool from
+the *host's* core count and take cores the scheduler promised other jobs. `scan_shard_go.sh`
+carried a comment asserting the reverse — that the work is CPU-bound and "goroutine count
+barely matters" — which contradicted the measurements three paragraphs above it in this very
+file. Corrected; if you change either default, re-run `benchmark.sh` and update the table
+rather than the prose.
 
 ### Correctness traps (hard-earned)
 
