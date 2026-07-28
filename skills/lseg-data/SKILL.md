@@ -154,7 +154,7 @@ ld.close_session()
 
 ## Authentication
 
-Four options. The first two are for the `lseg.data` library; the last two need no credentials of your own. The first two are for the `lseg.data` library; the third needs no credentials of your own.
+Four options. The first two are for the `lseg.data` library; the last two need no credentials of your own.
 
 **Platform session (works on every OS)** — config file or environment variables, below. This is the only `lseg.data` session type available on Linux.
 
