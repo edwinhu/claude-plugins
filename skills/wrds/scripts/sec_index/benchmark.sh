@@ -10,7 +10,7 @@
 # outputs for each variant.
 #
 # Usage (on WRDS):
-#   cd "$WRDS_SCRATCH/sec_index_rga"
+#   cd "$WRDS_SCRATCH/sec_index"
 #   bash bin/benchmark.sh                # default task_id=1 (shard 000000)
 #   bash bin/benchmark.sh --task-id 3
 
@@ -18,9 +18,9 @@ set -uo pipefail
 
 WRDS_SCRATCH="${WRDS_SCRATCH:-/scratch/${WRDS_INST:-nyu}/$(whoami)}"
 BENCH_DIR="${BENCH_DIR:-$WRDS_SCRATCH/sec_index_bench}"
-SHARD_LIST="${SHARD_LIST:-$WRDS_SCRATCH/sec_index_rga/shards.txt}"
+SHARD_LIST="${SHARD_LIST:-$WRDS_SCRATCH/sec_index/shards.txt}"
 ARCHIVE_ROOT="${ARCHIVE_ROOT:-/wrds/sec/archives}"
-BIN_DIR="${BIN_DIR:-$WRDS_SCRATCH/sec_index_rga/bin}"
+BIN_DIR="${BIN_DIR:-$WRDS_SCRATCH/sec_index/bin}"
 BASELINE_OUT="${BASELINE_OUT:-$WRDS_SCRATCH/sec_index/prototype_backup/shard_0001.tsv.gz}"
 TASK_ID=1
 

@@ -12,9 +12,10 @@
 #
 #   WRDS_SCRATCH   root for shard list, binaries and output
 #                  (default: /scratch/${WRDS_INST:-nyu}/$(whoami))
-#   SHARD_LIST     shard list file      (default: $WRDS_SCRATCH/sec_index_rga/shards.txt)
+#   SHARD_LIST     shard list file      (default: $WRDS_SCRATCH/sec_index/shards.txt)
 #   OUT_DIR        gzipped TSV output   (default: $WRDS_SCRATCH/sec_index)
-#   SCAN_BIN       scanner to exec      (default: $WRDS_SCRATCH/sec_index_rga/bin/scan_shard.sh)
+#   SCAN_BIN       scanner to exec      (default: $WRDS_SCRATCH/sec_index/bin/scan_shard_go.sh)
+#                  Set SCAN_BIN=.../scan_shard.sh for the awk fallback (26x slower).
 #   ARCHIVE_ROOT   EDGAR archive root   (default: /wrds/sec/archives)
 #
 # `#$ -o logs/` is relative to -cwd on purpose: SGE parses the `#$` block
@@ -25,7 +26,7 @@
 # elsewhere.
 #
 # Submit ALL 164 shards:
-#   cd "$WRDS_SCRATCH/sec_index_rga" && mkdir -p logs
+#   cd "$WRDS_SCRATCH/sec_index" && mkdir -p logs
 #   ls -d /wrds/sec/archives/*/ | sed 's|/wrds/sec/archives/||;s|/$||' | sort > shards.txt
 #   qsub -t 1-$(wc -l < shards.txt) submit_array.sh
 #
@@ -36,10 +37,15 @@ set -u
 
 WRDS_SCRATCH="${WRDS_SCRATCH:-/scratch/${WRDS_INST:-nyu}/$(whoami)}"
 
-export SHARD_LIST="${SHARD_LIST:-$WRDS_SCRATCH/sec_index_rga/shards.txt}"
+export SHARD_LIST="${SHARD_LIST:-$WRDS_SCRATCH/sec_index/shards.txt}"
 export OUT_DIR="${OUT_DIR:-$WRDS_SCRATCH/sec_index}"
 export ARCHIVE_ROOT="${ARCHIVE_ROOT:-/wrds/sec/archives}"
-SCAN_BIN="${SCAN_BIN:-$WRDS_SCRATCH/sec_index_rga/bin/scan_shard.sh}"
+# THE GO SCANNER IS THE DEFAULT. references/edgar.md has said "Use the Go
+# scanner (recommended)" since it was measured at 22s/shard against awk's 583s,
+# but this wrapper still exec'd the awk baseline — so the documented
+# recommendation and the thing that actually ran disagreed by 26x, and every
+# full 164-shard run took the slow path unless someone set SCAN_BIN by hand.
+SCAN_BIN="${SCAN_BIN:-$WRDS_SCRATCH/sec_index/bin/scan_shard_go.sh}"
 
 mkdir -p "$OUT_DIR" logs
 

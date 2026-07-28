@@ -1,17 +1,24 @@
 #!/usr/bin/env -S uv run python3
-"""Driver for the rga+SGE SEC index pipeline.
+"""Driver for the SGE-sharded SEC full-text index.
+
+NOTE ON THE NAME: this was once called `sec_index_rga` after ripgrep-all.
+`rga` is NOT used and never was in the shipped path — it exists to search
+inside PDF/DOCX/zip/SQLite by shelling out to extractors, and EDGAR filings
+are plain text, so it would add per-file adapter cost for nothing. The three
+scanners are awk-per-file (baseline), rg|awk (rejected, fails parity) and a
+Go helper (shipped default).
 
 Steps:
 1. Refresh shard list on WRDS.
 2. Submit SGE array (default: 5 shards; --all for 1-N).
 3. Poll qstat until array finishes.
 4. rclone gzipped TSVs back to local.
-5. Concatenate to parquet at data/processed/sec_index_rga.parquet.
+5. Concatenate to parquet at data/processed/sec_index.parquet.
 
 Usage:
-    python scripts/sec_index_rga/build_index.py --tasks 5              # submit+wait 5 shards
-    python scripts/sec_index_rga/build_index.py --all                   # submit all 164
-    python scripts/sec_index_rga/build_index.py --concat-only           # just concat whatever is present
+    python scripts/sec_index/build_index.py --tasks 5              # submit+wait 5 shards
+    python scripts/sec_index/build_index.py --all                   # submit all 164
+    python scripts/sec_index/build_index.py --concat-only           # just concat whatever is present
 """
 from __future__ import annotations
 
@@ -44,11 +51,11 @@ def _remote_scratch() -> str:
 
 
 REMOTE_SCRATCH = _remote_scratch()
-REMOTE_ROOT = f"{REMOTE_SCRATCH}/sec_index_rga"
+REMOTE_ROOT = f"{REMOTE_SCRATCH}/sec_index"
 REMOTE_BIN = f"{REMOTE_ROOT}/bin"
 REMOTE_OUT = f"{REMOTE_SCRATCH}/sec_index"
-LOCAL_OUT = Path(os.environ.get("SEC_INDEX_LOCAL_OUT", "data/processed/sec_index_rga"))
-PARQUET_PATH = Path(os.environ.get("SEC_INDEX_PARQUET", "data/processed/sec_index_rga.parquet"))
+LOCAL_OUT = Path(os.environ.get("SEC_INDEX_LOCAL_OUT", "data/processed/sec_index"))
+PARQUET_PATH = Path(os.environ.get("SEC_INDEX_PARQUET", "data/processed/sec_index.parquet"))
 
 
 def ssh(cmd: str) -> str:
